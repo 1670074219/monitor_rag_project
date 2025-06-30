@@ -55,18 +55,18 @@ def main():
     # 您提供的像素坐标点 (来自 frame.jpg)
     # 点1, 点2, 点3, 点4
     pixel_points_calib = [
-        (479, 117),
-        (629, 122),
-        (1033, 717),
-        (206, 716)
+        (517, 95),
+        (667, 95),
+        (1182, 720),
+        (276, 720)
     ]
     
     # 对应的真实世界坐标点 (单位：米)
     real_world_points_calib = [
-        (0.0, 0.0),
-        (1.0, 0.0),
-        (1.0, 1.0),
-        (0.0, 1.0)
+        (400, 351),
+        (525, 351),
+        (525, 1020),
+        (400, 1020)
     ]
 
     # --- 2. 计算单应性矩阵 ---
@@ -83,8 +83,12 @@ def main():
     print(f"使用的设备: {device}")
 
     try:
-        # 使用 ultralytics 包加载本地的 YOLOv11 模型
-        yolo_model_path = 'video_process/yolo/yolo11s.pt'
+        # 使用绝对路径加载本地的 YOLOv11 模型
+        import os
+        yolo_model_path = os.path.abspath('video_process/yolo/yolo11s.pt')
+        print(f"尝试加载YOLO模型: {yolo_model_path}")
+        print(f"文件是否存在: {os.path.exists(yolo_model_path)}")
+        
         yolo_model = YOLO(yolo_model_path)
         yolo_model.to(device)
         print(f"YOLOv11 本地模型 '{yolo_model_path}' 加载成功。")
@@ -108,7 +112,7 @@ def main():
     )
 
     # --- 4. 视频处理 ---
-    video_path = 'video_process/saved_video/camera6_20250617_153316.mp4'
+    video_path = '/root/data1/monitor_rag_project/camera1_20250609_164924.mp4'
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
@@ -134,33 +138,64 @@ def main():
         # 使用 YOLO 模型进行目标检测
         results = yolo_model(img_rgb)
 
-        # 获取检测结果
-        # ultralytics 的 results 对象可以直接访问 xyxy, conf, cls
+        # 获取检测结果 - 只检测人
         person_detections = []
-        for res in results:
-            for box in res.boxes:
-                if box.cls == 0: # 类别0是 'person'
-                    person_detections.append(box.xyxy[0].tolist() + [box.conf[0].item()] + [box.cls[0].item()])
         
-        person_detections = torch.tensor(person_detections)
+        if results[0].boxes is not None:
+            for box in results[0].boxes:
+                # 检查是否是人 (class 0)
+                if int(box.cls.item()) == 0:
+                    # 获取边界框坐标 (xyxy格式)
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = box.conf.item()
+                    
+                    # 只保留置信度高的检测
+                    if confidence > 0.5:
+                        person_detections.append([x1, y1, x2, y2, confidence])
 
-        print(f"\n--- 帧 {frame_count} (检测到 {len(person_detections)} 个目标) ---")
+        print(f"\n--- 帧 {frame_count} (检测到 {len(person_detections)} 个人) ---")
 
         if len(person_detections) > 0:
             try:
-                bbox_xywh = person_detections[:, :4].clone() # YOLO 格式是 xyxy, 需要转换
-                # (center_x, center_y, width, height)
-                bbox_xywh[:, 0] = (person_detections[:, 0] + person_detections[:, 2]) / 2
-                bbox_xywh[:, 1] = (person_detections[:, 1] + person_detections[:, 3]) / 2
-                bbox_xywh[:, 2] = person_detections[:, 2] - person_detections[:, 0]
-                bbox_xywh[:, 3] = person_detections[:, 3] - person_detections[:, 1]
+                # 转换为numpy数组
+                person_detections = np.array(person_detections)
+                
+                # 验证和清理边界框
+                valid_detections = []
+                for det in person_detections:
+                    x1, y1, x2, y2, conf = det
+                    
+                    # 确保坐标在图像范围内且有效
+                    h, w = frame.shape[:2]
+                    x1 = max(0, min(x1, w-1))
+                    y1 = max(0, min(y1, h-1))
+                    x2 = max(0, min(x2, w-1))
+                    y2 = max(0, min(y2, h-1))
+                    
+                    # 确保边界框有效 (宽度和高度>0)
+                    if x2 > x1 and y2 > y1:
+                        valid_detections.append([x1, y1, x2, y2, conf])
+                
+                if len(valid_detections) == 0:
+                    continue
+                    
+                valid_detections = np.array(valid_detections)
+                
+                # 转换xyxy到xywh格式 (DeepSORT需要)
+                bbox_xywh = np.zeros_like(valid_detections[:, :4])
+                bbox_xywh[:, 0] = (valid_detections[:, 0] + valid_detections[:, 2]) / 2  # center_x
+                bbox_xywh[:, 1] = (valid_detections[:, 1] + valid_detections[:, 3]) / 2  # center_y  
+                bbox_xywh[:, 2] = valid_detections[:, 2] - valid_detections[:, 0]        # width
+                bbox_xywh[:, 3] = valid_detections[:, 3] - valid_detections[:, 1]        # height
 
-                confidences = person_detections[:, 4]
+                confidences = valid_detections[:, 4]
                 
                 # 更新 DeepSORT 追踪器
-                outputs = deepsort.update(bbox_xywh.cpu(), confidences.cpu(), frame, feature_extractor)
+                outputs = deepsort.update(bbox_xywh, confidences, frame, feature_extractor)
             except Exception as e:
                 print(f"  处理检测结果时出错: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
             
             if len(outputs) > 0:

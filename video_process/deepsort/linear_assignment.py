@@ -63,6 +63,10 @@ def min_cost_matching(
             unmatched_tracks.append(track_idx)
 
     for row, col in zip(row_ind, col_ind):
+        # 添加边界检查
+        if row >= len(track_indices) or col >= len(detection_indices):
+            continue
+            
         track_idx = track_indices[row]
         detection_idx = detection_indices[col]
         if cost_matrix[row, col] > max_distance:
@@ -173,9 +177,29 @@ def gate_cost_matrix(
     gating_threshold = kalman_filter.chi2inv95[gating_dim]
     measurements = np.asarray(
         [detections[i].to_xyah() for i in detection_indices])
+    
     for row, track_idx in enumerate(track_indices):
         track = tracks[track_idx]
-        gating_distance = kf.gating_distance(
-            track.mean, track.covariance, measurements, only_position)
-        cost_matrix[row, gating_distance > gating_threshold] = gated_cost
+        try:
+            gating_distance = kf.gating_distance(
+                track.mean, track.covariance, measurements, only_position)
+            
+            # 确保gating_distance是一维数组，长度与检测数量匹配
+            if gating_distance.ndim == 0:
+                gating_distance = np.array([gating_distance])
+            
+            if len(gating_distance) != len(detection_indices):
+                # 长度不匹配时，将整行设为高成本
+                cost_matrix[row, :] = gated_cost
+                continue
+                
+            # 逐个设置成本矩阵
+            for col, dist in enumerate(gating_distance):
+                if dist > gating_threshold:
+                    cost_matrix[row, col] = gated_cost
+                    
+        except Exception as e:
+            # 如果出错，将整行设为高成本
+            cost_matrix[row, :] = gated_cost
+            
     return cost_matrix 

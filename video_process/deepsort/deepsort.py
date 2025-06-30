@@ -33,8 +33,16 @@ class DeepSort(object):
                 return np.array([])
                 
             bbox_tlwh = self._xywh_to_tlwh(bbox_xywh)
+            
+            # 确保特征数量与边界框数量匹配
+            if len(features) != len(bbox_tlwh):
+                min_len = min(len(features), len(bbox_tlwh), len(confidences))
+                features = features[:min_len]
+                bbox_tlwh = bbox_tlwh[:min_len]
+                confidences = confidences[:min_len]
+            
             detections = [Detection(bbox_tlwh[i], conf, features[i]) for i, conf in enumerate(
-                confidences) if conf > self.min_confidence]
+                confidences) if conf > self.min_confidence]   
 
             if len(detections) == 0:
                 return np.array([])
@@ -102,22 +110,32 @@ class DeepSort(object):
     def _get_features(self, bbox_xywh, ori_img, feature_extractor):
         try:
             im_crops = []
-            for box in bbox_xywh:
+            valid_indices = []
+            
+            for i, box in enumerate(bbox_xywh):
                 x1, y1, x2, y2 = self._xywh_to_xyxy(box)
                 # 确保坐标在有效范围内
                 if x2 > x1 and y2 > y1:
                     im = ori_img[y1:y2, x1:x2]
                     if im.size > 0:  # 确保图像不为空
                         im_crops.append(im)
+                        valid_indices.append(i)
                         
             if im_crops:
                 features = feature_extractor(im_crops)
                 # 确保返回的特征是 numpy 数组
                 if isinstance(features, torch.Tensor):
                     features = features.cpu().numpy()
-                return features
+                    
+                # 创建完整的特征数组，无效位置填充零
+                full_features = np.zeros((len(bbox_xywh), features.shape[1]))
+                for i, valid_idx in enumerate(valid_indices):
+                    full_features[valid_idx] = features[i]
+                    
+                return full_features
             else:
-                return np.array([])
+                # 返回与输入数量匹配的零特征
+                return np.zeros((len(bbox_xywh), 512))  # 假设特征维度是512
         except Exception as e:
-            print(f"特征提取错误: {e}")
-            return np.array([]) 
+            # 返回与输入数量匹配的零特征
+            return np.zeros((len(bbox_xywh), 512)) 

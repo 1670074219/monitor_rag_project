@@ -891,16 +891,6 @@ onMounted(async () => {
   }
 }
 
-// Remove previous collapsible chat styles
-/*
-.collapsible-chat-container { ... }
-.collapsible-chat-container.is-visible { ... }
-.chat-toggle-button { ... }
-.chat-toggle-button:hover { ... }
-.chat-content-wrapper { ... }
-.chat-content-wrapper > :deep(div) { ... }
-*/
-
 // Styles for the NEW Dropdown Chat
 .chat-dropdown-toggle-button {
   position: absolute;

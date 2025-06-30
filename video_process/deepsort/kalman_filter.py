@@ -219,10 +219,23 @@ class KalmanFilter(object):
             mean, covariance = mean[:2], covariance[:2, :2]
             measurements = measurements[:, :2]
 
-        cholesky_factor = np.linalg.cholesky(covariance)
-        d = measurements - mean
-        z = scipy.linalg.solve_triangular(
-            cholesky_factor, d.T, lower=True, check_finite=False,
-            overwrite_b=True)
-        squared_maha = np.sum(z * z, axis=0)
-        return squared_maha 
+        # 确保measurements是二维数组
+        if measurements.ndim == 1:
+            measurements = measurements.reshape(1, -1)
+            
+        try:
+            cholesky_factor = np.linalg.cholesky(covariance)
+            d = measurements - mean
+            z = scipy.linalg.solve_triangular(
+                cholesky_factor, d.T, lower=True, check_finite=False,
+                overwrite_b=True)
+            squared_maha = np.sum(z * z, axis=0)
+            
+            # 确保返回值总是一维数组
+            if squared_maha.ndim == 0:
+                squared_maha = np.array([squared_maha])
+                
+            return squared_maha
+        except Exception as e:
+            # 返回一个较大的距离值，表示不匹配
+            return np.full(len(measurements), 999999.0) 

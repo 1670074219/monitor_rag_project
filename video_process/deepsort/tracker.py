@@ -61,43 +61,63 @@ class Tracker:
             A list of detections at the current time step.
 
         """
-        # Run matching cascade.
-        matches, unmatched_tracks, unmatched_detections = \
-            self._match(detections)
+        try:
+            # Run matching cascade.
+            matches, unmatched_tracks, unmatched_detections = \
+                self._match(detections)
 
-        # Update track set.
-        for track_idx, detection_idx in matches:
-            self.tracks[track_idx].update(
-                self.kf, detections[detection_idx])
-        for track_idx in unmatched_tracks:
-            self.tracks[track_idx].mark_missed()
-        for detection_idx in unmatched_detections:
-            self._initiate_track(detections[detection_idx])
-        self.tracks = [t for t in self.tracks if not t.is_deleted()]
+            # Update track set.
+            for track_idx, detection_idx in matches:
+                self.tracks[track_idx].update(
+                    self.kf, detections[detection_idx])
+            for track_idx in unmatched_tracks:
+                self.tracks[track_idx].mark_missed()
+            for detection_idx in unmatched_detections:
+                self._initiate_track(detections[detection_idx])
+            self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
-        # Update distance metric.
-        active_targets = [t.track_id for t in self.tracks if t.is_confirmed()]
-        features, targets = [], []
-        for track in self.tracks:
-            if not track.is_confirmed():
-                continue
-            features += track.features
-            targets += [track.track_id for _ in track.features]
-            track.features = []
-        self.metric.partial_fit(
-            np.asarray(features), np.asarray(targets), active_targets)
+            # Update distance metric.
+            active_targets = [t.track_id for t in self.tracks if t.is_confirmed()]
+            features, targets = [], []
+            for track in self.tracks:
+                if not track.is_confirmed():
+                    continue
+                features += track.features
+                targets += [track.track_id for _ in track.features]
+                track.features = []
+            
+            if len(features) > 0:
+                self.metric.partial_fit(
+                    np.asarray(features), np.asarray(targets), active_targets)
+            
+        except Exception as e:
+            print(f"  Tracker.update错误: {e}")
+            # 重置tracker状态，避免持续错误
+            self.tracks = []
+            return []
 
     def _match(self, detections):
 
         def gated_metric(tracks, dets, track_indices, detection_indices):
-            features = np.array([dets[i].feature for i in detection_indices])
-            targets = np.array([tracks[i].track_id for i in track_indices])
-            cost_matrix = self.metric.distance(features, targets)
-            cost_matrix = linear_assignment.gate_cost_matrix(
-                self.kf, cost_matrix, tracks, dets, track_indices,
-                detection_indices)
+            try:
+                features = np.array([dets[i].feature for i in detection_indices])
+                targets = np.array([tracks[i].track_id for i in track_indices])
+                
+                # 注意：distance返回的是(features数量, targets数量)，需要转置为(tracks数量, detections数量)
+                distance_matrix = self.metric.distance(features, targets)
+                
+                # 转置以匹配期望的维度：(track_indices数量, detection_indices数量)
+                cost_matrix = distance_matrix.T
+                
+                cost_matrix = linear_assignment.gate_cost_matrix(
+                    self.kf, cost_matrix, tracks, dets, track_indices,
+                    detection_indices)
 
-            return cost_matrix
+                return cost_matrix
+            except Exception as e:
+                print(f"    gated_metric错误: {e}")
+                # 返回一个高成本矩阵作为备选
+                return np.full((len(track_indices), len(detection_indices)), 999999.0)
 
         # Split track set into confirmed and unconfirmed tracks.
         confirmed_tracks = [
@@ -106,10 +126,14 @@ class Tracker:
             i for i, t in enumerate(self.tracks) if not t.is_confirmed()]
 
         # Associate confirmed tracks using appearance features.
-        matches_a, unmatched_tracks_a, unmatched_detections = \
-            linear_assignment.matching_cascade(
-                gated_metric, self.metric.matching_threshold, self.max_age,
-                self.tracks, detections, confirmed_tracks)
+        try:
+            matches_a, unmatched_tracks_a, unmatched_detections = \
+                linear_assignment.matching_cascade(
+                    gated_metric, self.metric.matching_threshold, self.max_age,
+                    self.tracks, detections, confirmed_tracks)
+        except Exception as e:
+            print(f"    _match: matching_cascade错误: {e}")
+            matches_a, unmatched_tracks_a, unmatched_detections = [], confirmed_tracks, list(range(len(detections)))
 
         # Associate remaining tracks together with unconfirmed tracks using IOU.
         iou_track_candidates = unconfirmed_tracks + [
@@ -118,10 +142,15 @@ class Tracker:
         unmatched_tracks_a = [
             k for k in unmatched_tracks_a if
             self.tracks[k].time_since_update != 1]
-        matches_b, unmatched_tracks_b, unmatched_detections = \
-            linear_assignment.min_cost_matching(
-                iou_matching.iou_cost, self.max_iou_distance, self.tracks,
-                detections, iou_track_candidates, unmatched_detections)
+        
+        try:
+            matches_b, unmatched_tracks_b, unmatched_detections = \
+                linear_assignment.min_cost_matching(
+                    iou_matching.iou_cost, self.max_iou_distance, self.tracks,
+                    detections, iou_track_candidates, unmatched_detections)
+        except Exception as e:
+            print(f"    _match: IOU匹配错误: {e}")
+            matches_b, unmatched_tracks_b = [], iou_track_candidates
 
         matches = matches_a + matches_b
         unmatched_tracks = list(set(unmatched_tracks_a + unmatched_tracks_b))
