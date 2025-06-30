@@ -747,8 +747,30 @@ def get_events_3d():
                     'original_filename': video_key
                 }
             
-            # 在摄像头覆盖区域内生成随机位置
-            position = generate_random_position_in_area(event_info['camera_id'], video_key)
+            # 检查是否有轨迹数据，优先使用轨迹起点作为事件位置
+            has_trajectory = 'trajectory_data' in video_info and 'trajectories' in video_info['trajectory_data']
+            
+            if has_trajectory and video_info['trajectory_data']['trajectories']:
+                # 使用第一条轨迹的起点作为事件位置
+                first_trajectory = video_info['trajectory_data']['trajectories'][0]
+                if first_trajectory.get('coordinates'):
+                    start_coord = first_trajectory['coordinates'][0]
+                    if len(start_coord) >= 2:
+                                                 # 轨迹数据已经是像素坐标，直接使用轨迹起点作为事件位置
+                         position = {
+                             'pixel_x': start_coord[0],  # 直接使用轨迹起点X坐标
+                             'pixel_y': start_coord[1]   # 直接使用轨迹起点Y坐标
+                         }
+                    else:
+                        # 备用：随机位置
+                        position = generate_random_position_in_area(event_info['camera_id'], video_key)
+                else:
+                    # 备用：随机位置  
+                    position = generate_random_position_in_area(event_info['camera_id'], video_key)
+            else:
+                # 在摄像头覆盖区域内生成随机位置
+                position = generate_random_position_in_area(event_info['camera_id'], video_key)
+            
             if not position:
                 continue
             
@@ -764,8 +786,7 @@ def get_events_3d():
             if video_info.get('video_path'):
                 video_file = os.path.basename(video_info['video_path'])
             
-            # 检查是否有轨迹数据
-            has_trajectory = 'trajectory_data' in video_info and 'trajectories' in video_info['trajectory_data']
+            # has_trajectory 已在上面计算过
             
             # 构建事件对象
             event = {
@@ -832,12 +853,28 @@ def get_event_trajectory(event_id):
         logger.error(f"获取轨迹数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
 
-def convert_real_world_to_scene_coords(real_x, real_y):
-    """将真实世界坐标转换为3D场景坐标"""
-    # 根据您的3D场景设置调整这些转换参数
-    # 这些参数需要与前端的平面图设置匹配
-    scene_x = (real_x - 462.5) / 100  # 调整偏移和缩放
-    scene_z = (real_y - 685.5) / 100  # Y轴对应3D的Z轴
+def convert_pixel_to_scene_coords(pixel_x, pixel_y):
+    """将像素坐标转换为3D场景坐标"""
+    # 地图像素尺寸: 3156x1380 (宽x高)
+    # 前端3D场景平面大小: width=25, height=25/(3156/1380)≈10.93 单位
+    
+    map_width = 3156
+    map_height = 1380
+    scene_width = 25
+    # 前端根据图片宽高比计算高度：25 / (3156/1380)
+    scene_height = scene_width / (map_width / map_height)
+    
+    # 将像素坐标转换为3D场景坐标
+    # 像素坐标系：左上角(0,0)，向右X增加，向下Y增加
+    # 3D场景坐标系：中心为(0,0)，X轴左右，Z轴前后
+    
+    # 转换为场景坐标，中心为原点
+    scene_x = (pixel_x - map_width/2) * scene_width / map_width
+    scene_z = (pixel_y - map_height/2) * scene_height / map_height
+    
+    # 添加调试信息
+    logger.debug(f"坐标转换: 像素({pixel_x:.2f}, {pixel_y:.2f}) -> 场景({scene_x:.3f}, {scene_z:.3f})")
+    logger.debug(f"场景尺寸: width={scene_width}, height={scene_height:.3f}")
     
     return scene_x, scene_z
 
@@ -889,7 +926,7 @@ def get_event_trajectory_scene_coords(event_id):
             for coord in coordinates:
                 if len(coord) >= 2:
                     real_x, real_y = coord[0], coord[1]
-                    scene_x, scene_z = convert_real_world_to_scene_coords(real_x, real_y)
+                    scene_x, scene_z = convert_pixel_to_scene_coords(real_x, real_y)
                     
                     scene_coords.append({
                         'x': round(scene_x, 3),
