@@ -30,7 +30,7 @@ const forceContentTypePlugin = () => ({
 const serveVideoPlugin = () => ({
   name: 'serve-video',
   configureServer(server) {
-    const videoDir = '/root/data1/Demo/test/Processed_video_h264'; // 确认 H.264 视频目录
+    const videoDir = '/root/data1/monitor_rag_project/video_process/saved_video'; // 当前项目的视频目录
     console.log(`Video serving configured for directory: ${videoDir}`);
 
     server.middlewares.use((req, res, next) => {
@@ -111,17 +111,12 @@ export default defineConfig({
     },
     // Add fs.allow configuration
     fs: {
-      // Allow serving files from the target directory of the symlink
+      // Allow serving files from the current project
       allow: [
-        '/root/data1/Demo/test/Processed_video_h264',
-        '/root/data1/demo/test_Data/Processed_video_h264',
-        '/root/data1/demo/frontend',
-        '/root/data1/demo/frontend/src',
-        // Include Vite's default search path if needed, or your project root
-        // searchForWorkspaceRoot(process.cwd()), // Uncomment if necessary
-         '/root/data1/re/ccc', // Explicitly allow project root just in case
-         searchForWorkspaceRoot(process.cwd()), // 启用这个选项
-         '/root/data1/demo', // 更新为新容器的项目根目录
+        '/root/data1/monitor_rag_project/video_process/saved_video',
+        '/root/data1/monitor_rag_project/frontend',
+        '/root/data1/monitor_rag_project',
+        searchForWorkspaceRoot(process.cwd()), // 启用工作区根目录访问
       ]
     },
     watch: {
@@ -130,7 +125,7 @@ export default defineConfig({
          // 忽略 node_modules（无论是否在 fs.allow 中）
         '**/node_modules/**',
         // 忽略视频目录（即使允许访问）
-        '/root/data1/Demo/test/Processed_video_h264/**',
+        '/root/data1/monitor_rag_project/video_process/saved_video/**',
         // 忽略 public 目录
         '**/public/**',
         // 忽略 .git 目录

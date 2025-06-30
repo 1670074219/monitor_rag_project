@@ -26,13 +26,27 @@
           <h3>事件详情</h3>
           <div class="event-content">
             <pre>{{ selectedEvent.content || '(无内容)' }}</pre>
-            <button
-              v-if="selectedEvent.videoFile"
-              @click="playVideo(selectedEvent.videoFile)"
-              class="play-button"
-            >
-              播放视频
-            </button>
+            <div class="event-actions">
+              <button
+                v-if="selectedEvent.videoFile"
+                @click="playVideo(selectedEvent.videoFile)"
+                class="play-button"
+              >
+                📹 播放视频
+              </button>
+              
+              <button
+                v-if="selectedEvent.has_trajectory"
+                @click="toggleTrajectory(selectedEvent.id)"
+                :class="['trajectory-button', { 'active': currentTrajectoryEventId === selectedEvent.id }]"
+              >
+                {{ currentTrajectoryEventId === selectedEvent.id ? '🛤️ 隐藏轨迹' : '🛤️ 显示轨迹' }}
+              </button>
+              
+              <span v-else-if="!selectedEvent.has_trajectory" class="no-trajectory-hint">
+                此事件无轨迹数据
+              </span>
+            </div>
           </div>
         </div>
         <div v-else-if="!eventsLoading && events.length === 0 && !initialLoadPending" class="no-logs-message">
@@ -126,8 +140,8 @@ const toggleDropdownChat = () => {
 // 使用数据中存在的日期，而不是今天
 const formatDate = (date) => date.toISOString().split('T')[0]
 
-// 设置为2025-06-09，因为API数据中有这个日期的事件
-const selectedDate = ref('2025-06-09')
+// 设置为2025-06-23，因为API数据中有这个日期的事件和轨迹数据
+const selectedDate = ref('2025-06-23')
 const timeOfDaySeconds = ref(0)
 
 // Restore absoluteTimestampForFiltering and other removed refs
@@ -158,6 +172,9 @@ const eventsLoading = ref(false)
 const initialLoadPending = ref(true) // New ref to track if initial load via onFloorplanLoad is pending
 const threeDMap = ref(null)
 const weeklyAbnormalData = ref([])
+
+// 轨迹相关状态
+const currentTrajectoryEventId = ref(null)
 // 直接使用区域随机布局
 
 const timeWindow = 600; // 调整时间窗口到2分钟（120秒）
@@ -251,7 +268,8 @@ const updateVisibleMarkers = (currentVisibleEvents) => { // Accept the list as a
           // Pass original pixel coords in metadata too, might be useful
           pixel_x: event.position.pixel_x,
           pixel_y: event.position.pixel_y,
-          is_abnormal: event.is_abnormal || false // Pass the abnormal flag
+          is_abnormal: event.is_abnormal || false, // Pass the abnormal flag
+          has_trajectory: event.has_trajectory || false // Pass the trajectory flag
         });
         successCount++;
     } else {
@@ -304,6 +322,32 @@ const handlePlayVideoFromChat = (videoFileName) => {
     playVideo(videoFileName);
   } else {
     console.warn('handlePlayVideoFromChat received empty filename');
+  }
+};
+
+// 轨迹显示切换
+const toggleTrajectory = async (eventId) => {
+  if (!threeDMap.value) {
+    console.warn('ThreeDMap component not ready');
+    return;
+  }
+  
+  try {
+    console.log(`切换事件 ${eventId} 的轨迹显示`);
+    
+    const success = await threeDMap.value.toggleTrajectory(eventId);
+    
+    // 直接从3D组件获取当前显示的轨迹事件ID
+    currentTrajectoryEventId.value = threeDMap.value.currentTrajectoryEventId;
+    
+    if (success) {
+      console.log(`轨迹显示成功: 事件 ${eventId}`);
+    } else {
+      console.log(`轨迹已隐藏: 事件 ${eventId}`);
+    }
+    
+  } catch (error) {
+    console.error('切换轨迹显示失败:', error);
   }
 };
 
@@ -423,7 +467,8 @@ const fetchEvents = async () => {
         content: event.content || '(无内容)', 
         videoFile: event.videoFile || null,
         cam_id: event.cam_id || 'N/A', // Ensure cam_id exists
-        is_abnormal: event.is_abnormal || false // Extract and store the abnormal flag
+        is_abnormal: event.is_abnormal || false, // Extract and store the abnormal flag
+        has_trajectory: event.has_trajectory || false // Extract and store the trajectory flag
       })).filter(e => e.timestamp !== null); // Filter out events where timestamp couldn't be parsed
       
       events.value = processedEvents; // Assign processed events
@@ -774,16 +819,55 @@ onMounted(async () => {
         font-family: monospace;
         font-size: 0.9em;
     }
-    .play-button {
+    .event-actions {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 10px;
+    }
+    
+    .play-button, .trajectory-button {
         background-color: var(--primary-color, #00ffff);
         color: #001529;
         border: none;
-        padding: 5px 10px;
+        padding: 8px 12px;
         border-radius: 4px;
         cursor: pointer;
-        margin-top: 10px;
-        transition: background-color 0.3s;
-        &:hover { background-color: #fff; }
+        transition: all 0.3s;
+        font-size: 0.9em;
+        font-weight: 500;
+        
+        &:hover { 
+            background-color: #fff; 
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0, 255, 255, 0.3);
+        }
+    }
+    
+    .trajectory-button {
+        background-color: #52c41a;
+        
+        &.active {
+            background-color: #ff4d4f;
+        }
+        
+        &:hover {
+            background-color: #73d13d;
+        }
+        
+        &.active:hover {
+            background-color: #ff7875;
+        }
+    }
+    
+    .no-trajectory-hint {
+        color: #666;
+        font-size: 0.8em;
+        font-style: italic;
+        padding: 8px 12px;
+        background-color: rgba(0, 0, 0, 0.2);
+        border-radius: 4px;
+        text-align: center;
     }
     .no-selection {
         flex-grow: 0; // Don't let it grow too much initially

@@ -21,6 +21,10 @@ const markers = shallowRef([])
 const currentPlane = shallowRef(null)
 const isFloorplanLoaded = ref(false)
 
+// 轨迹线条管理
+const trajectoryLines = shallowRef([])
+const currentTrajectoryEventId = ref(null)
+
 // Store floorplan dimensions for coordinate conversion
 const floorplanImageWidth = ref(0)
 const floorplanImageHeight = ref(0)
@@ -212,6 +216,185 @@ const clearMarkers = () => {
   markers.value = []
 }
 
+// 创建轨迹线条
+const createTrajectoryLine = (coordinates, color, trackId) => {
+  if (!coordinates || coordinates.length < 2) {
+    console.warn(`轨迹 ${trackId} 坐标点不足，无法创建线条`)
+    return null
+  }
+
+  try {
+    // 将坐标转换为Three.js Vector3数组
+    const points = coordinates.map(coord => 
+      new THREE.Vector3(coord.x, coord.y + 0.05, coord.z) // 稍微抬高一点，避免与地面重叠
+    )
+
+    // 创建线条几何体
+    const geometry = new THREE.BufferGeometry().setFromPoints(points)
+    
+    // 创建线条材质
+    const material = new THREE.LineBasicMaterial({
+      color: color,
+      linewidth: 3,
+      transparent: true,
+      opacity: 0.8
+    })
+
+    // 创建线条对象
+    const line = new THREE.Line(geometry, material)
+    line.userData = {
+      trackId: trackId,
+      type: 'trajectory',
+      color: color,
+      pointCount: coordinates.length
+    }
+
+    // 添加轨迹点标记（可选）
+    const pointMaterial = new THREE.MeshBasicMaterial({
+      color: color,
+      transparent: true,
+      opacity: 0.6
+    })
+    
+    coordinates.forEach((coord, index) => {
+      // 起点和终点使用不同大小的球体
+      const isStart = index === 0
+      const isEnd = index === coordinates.length - 1
+      const radius = isStart || isEnd ? 0.08 : 0.04
+      
+      const pointGeometry = new THREE.SphereGeometry(radius, 8, 6)
+      const point = new THREE.Mesh(pointGeometry, pointMaterial.clone())
+      
+      if (isStart) {
+        point.material.color.setHex(0x00ff00) // 起点绿色
+      } else if (isEnd) {
+        point.material.color.setHex(0xff0000) // 终点红色
+      }
+      
+      point.position.set(coord.x, coord.y + 0.06, coord.z)
+      point.userData = {
+        trackId: trackId,
+        type: 'trajectory_point',
+        index: index,
+        isStart: isStart,
+        isEnd: isEnd
+      }
+      
+      line.add(point)
+    })
+
+    console.log(`创建轨迹线条 - Track ID: ${trackId}, 颜色: ${color}, 点数: ${coordinates.length}`)
+    return line
+
+  } catch (error) {
+    console.error(`创建轨迹线条失败 - Track ID: ${trackId}:`, error)
+    return null
+  }
+}
+
+// 显示事件轨迹
+const showEventTrajectory = async (eventId) => {
+  if (!isFloorplanLoaded.value) {
+    console.warn('平面图未加载，无法显示轨迹')
+    return false
+  }
+
+  try {
+    console.log(`开始加载事件 ${eventId} 的轨迹数据`)
+    
+    // 清除当前轨迹
+    clearTrajectories()
+    
+    // 获取轨迹数据
+    const response = await fetch(`/api/trajectory/${eventId}/scene_coords`)
+    
+    if (!response.ok) {
+      const errorData = await response.json()
+      console.error('获取轨迹数据失败:', errorData.error)
+      return false
+    }
+
+    const trajectoryData = await response.json()
+    console.log('轨迹数据获取成功:', trajectoryData)
+
+    if (!trajectoryData.trajectories || trajectoryData.trajectories.length === 0) {
+      console.warn('该事件没有轨迹数据')
+      return false
+    }
+
+    // 创建每条轨迹的线条
+    const createdLines = []
+    for (const trajectory of trajectoryData.trajectories) {
+      const line = createTrajectoryLine(
+        trajectory.coordinates,
+        trajectory.color,
+        trajectory.track_id
+      )
+      
+      if (line) {
+        scene.value.add(line)
+        createdLines.push(line)
+      }
+    }
+
+    trajectoryLines.value = createdLines
+    currentTrajectoryEventId.value = eventId
+
+    console.log(`成功显示 ${createdLines.length} 条轨迹线条`)
+    return true
+
+  } catch (error) {
+    console.error('显示轨迹失败:', error)
+    return false
+  }
+}
+
+// 清除所有轨迹线条
+const clearTrajectories = () => {
+  trajectoryLines.value.forEach(line => {
+    if (scene.value) {
+      scene.value.remove(line)
+    }
+    
+    // 清理几何体和材质
+    if (line.geometry) {
+      line.geometry.dispose()
+    }
+    if (line.material) {
+      line.material.dispose()
+    }
+    
+    // 清理子对象（轨迹点）
+    line.children.forEach(child => {
+      if (child.geometry) child.geometry.dispose()
+      if (child.material) child.material.dispose()
+    })
+  })
+  
+  trajectoryLines.value = []
+  currentTrajectoryEventId.value = null
+  console.log('已清除所有轨迹线条')
+}
+
+// 切换轨迹显示
+const toggleTrajectory = async (eventId) => {
+  console.log(`toggleTrajectory 被调用 - eventId: ${eventId}`)
+  console.log(`当前显示的轨迹事件ID: ${currentTrajectoryEventId.value}`)
+  console.log(`平面图是否已加载: ${isFloorplanLoaded.value}`)
+  console.log(`3D场景是否存在: ${!!scene.value}`)
+  
+  if (currentTrajectoryEventId.value === eventId) {
+    // 如果当前显示的就是这个事件的轨迹，则清除
+    console.log('清除当前轨迹')
+    clearTrajectories()
+    return false
+  } else {
+    // 显示新的轨迹
+    console.log('显示新轨迹')
+    return await showEventTrajectory(eventId)
+  }
+}
+
 // 加载平面图
 const loadFloorPlan = (imagePath, onLoadCallback) => {
   isFloorplanLoaded.value = false
@@ -323,6 +506,9 @@ const cleanup = () => {
     cancelAnimationFrame(animationFrameId)
   }
   
+  // 清除轨迹线条
+  clearTrajectories()
+  
   if (scene.value) {
     // 清除更新函数
     scene.value.userData.updateFunctions = []
@@ -346,7 +532,9 @@ const cleanup = () => {
   }
   
   markers.value = []
+  trajectoryLines.value = []
   currentPlane.value = null
+  currentTrajectoryEventId.value = null
   scene.value = null
   camera.value = null
   controls.value = null
@@ -418,7 +606,11 @@ defineExpose({
   addMarker,
   clearMarkers,
   initScene,
-  isFloorplanLoaded
+  isFloorplanLoaded,
+  showEventTrajectory,
+  clearTrajectories,
+  toggleTrajectory,
+  currentTrajectoryEventId
 })
 </script>
 

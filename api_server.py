@@ -718,8 +718,16 @@ def get_3d_config():
 def get_events_3d():
     """获取3D显示用的事件数据"""
     try:
-        with open(video_description_path, 'r', encoding='utf-8') as f:
-            video_data = json.load(f)
+        # 尝试读取包含轨迹的JSON文件
+        trajectory_file_path = os.path.join(os.path.dirname(__file__), "video_process", "video_description_with_trajectory.json")
+        
+        if os.path.exists(trajectory_file_path):
+            with open(trajectory_file_path, 'r', encoding='utf-8') as f:
+                video_data = json.load(f)
+        else:
+            # 备用：使用原始文件
+            with open(video_description_path, 'r', encoding='utf-8') as f:
+                video_data = json.load(f)
         
         events = []
         
@@ -756,6 +764,9 @@ def get_events_3d():
             if video_info.get('video_path'):
                 video_file = os.path.basename(video_info['video_path'])
             
+            # 检查是否有轨迹数据
+            has_trajectory = 'trajectory_data' in video_info and 'trajectories' in video_info['trajectory_data']
+            
             # 构建事件对象
             event = {
                 'id': video_key,
@@ -768,7 +779,8 @@ def get_events_3d():
                 'date_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%Y-%m-%d'),
                 'time_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%H:%M:%S'),
                 'is_abnormal': is_abnormal,
-                'type': 'abnormal' if is_abnormal else 'normal'
+                'type': 'abnormal' if is_abnormal else 'normal',
+                'has_trajectory': has_trajectory
             }
             
             events.append(event)
@@ -781,6 +793,126 @@ def get_events_3d():
         
     except Exception as e:
         logger.error(f"获取3D事件数据错误: {str(e)}")
+        return jsonify({'error': '服务器错误'}), 500
+
+@app.route('/api/trajectory/<event_id>')
+def get_event_trajectory(event_id):
+    """获取指定事件的轨迹数据"""
+    try:
+        # 尝试读取包含轨迹的JSON文件
+        trajectory_file_path = os.path.join(os.path.dirname(__file__), "video_process", "video_description_with_trajectory.json")
+        
+        if os.path.exists(trajectory_file_path):
+            with open(trajectory_file_path, 'r', encoding='utf-8') as f:
+                video_data = json.load(f)
+        else:
+            # 备用：使用原始文件
+            with open(video_description_path, 'r', encoding='utf-8') as f:
+                video_data = json.load(f)
+        
+        if event_id not in video_data:
+            return jsonify({'error': '事件不存在'}), 404
+        
+        video_info = video_data[event_id]
+        trajectory_data = video_info.get('trajectory_data')
+        
+        if not trajectory_data or 'trajectories' not in trajectory_data:
+            return jsonify({'error': '该事件没有轨迹数据'}), 404
+        
+        # 返回原始轨迹数据
+        return jsonify({
+            'event_id': event_id,
+            'person_count': trajectory_data.get('person_count', 0),
+            'coordinate_system': trajectory_data.get('coordinate_system', 'real_world'),
+            'unit': trajectory_data.get('unit', 'centimeters'),
+            'trajectories': trajectory_data.get('trajectories', [])
+        })
+        
+    except Exception as e:
+        logger.error(f"获取轨迹数据错误: {str(e)}")
+        return jsonify({'error': '服务器错误'}), 500
+
+def convert_real_world_to_scene_coords(real_x, real_y):
+    """将真实世界坐标转换为3D场景坐标"""
+    # 根据您的3D场景设置调整这些转换参数
+    # 这些参数需要与前端的平面图设置匹配
+    scene_x = (real_x - 462.5) / 100  # 调整偏移和缩放
+    scene_z = (real_y - 685.5) / 100  # Y轴对应3D的Z轴
+    
+    return scene_x, scene_z
+
+@app.route('/api/trajectory/<event_id>/scene_coords')
+def get_event_trajectory_scene_coords(event_id):
+    """获取转换为3D场景坐标的轨迹数据"""
+    try:
+        # 尝试读取包含轨迹的JSON文件
+        trajectory_file_path = os.path.join(os.path.dirname(__file__), "video_process", "video_description_with_trajectory.json")
+        
+        if os.path.exists(trajectory_file_path):
+            with open(trajectory_file_path, 'r', encoding='utf-8') as f:
+                video_data = json.load(f)
+        else:
+            # 备用：使用原始文件
+            with open(video_description_path, 'r', encoding='utf-8') as f:
+                video_data = json.load(f)
+        
+        if event_id not in video_data:
+            return jsonify({'error': '事件不存在'}), 404
+        
+        video_info = video_data[event_id]
+        trajectory_data = video_info.get('trajectory_data')
+        
+        if not trajectory_data or 'trajectories' not in trajectory_data:
+            return jsonify({'error': '该事件没有轨迹数据'}), 404
+        
+        # 转换为3D场景坐标格式
+        scene_trajectories = []
+        trajectory_colors = [
+            '#ff4444',  # 红色
+            '#44ff44',  # 绿色  
+            '#4444ff',  # 蓝色
+            '#ffff44',  # 黄色
+            '#ff44ff',  # 紫色
+            '#44ffff',  # 青色
+            '#ff8844',  # 橙色
+            '#8844ff',  # 紫罗兰
+            '#44ff88',  # 青绿
+            '#ff4488'   # 洋红
+        ]
+        
+        for i, traj in enumerate(trajectory_data.get('trajectories', [])):
+            track_id = traj.get('track_id', i)
+            coordinates = traj.get('coordinates', [])
+            
+            # 转换坐标格式：[real_x, real_y] -> {x: scene_x, y: 0, z: scene_z}
+            scene_coords = []
+            for coord in coordinates:
+                if len(coord) >= 2:
+                    real_x, real_y = coord[0], coord[1]
+                    scene_x, scene_z = convert_real_world_to_scene_coords(real_x, real_y)
+                    
+                    scene_coords.append({
+                        'x': round(scene_x, 3),
+                        'y': 0,  # 地面高度
+                        'z': round(scene_z, 3)
+                    })
+            
+            if scene_coords:  # 只添加有坐标的轨迹
+                scene_trajectories.append({
+                    'track_id': track_id,
+                    'trajectory_length': len(scene_coords),
+                    'coordinates': scene_coords,
+                    'color': trajectory_colors[track_id % len(trajectory_colors)]
+                })
+        
+        return jsonify({
+            'event_id': event_id,
+            'person_count': trajectory_data.get('person_count', 0),
+            'trajectories': scene_trajectories
+        })
+        
+    except Exception as e:
+        logger.error(f"获取场景坐标轨迹数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
 
 
