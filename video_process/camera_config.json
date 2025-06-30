@@ -69,8 +69,59 @@
             "zone": "center_corridor"
         },
         {
+            "camera_id": "camera5",
+            "camera_url": "rtsp://admin:neu307neu307@192.168.201.168/cam/realmonitor?channel=1&subtype=0",
+            "position": {
+                "pixel_x": 1500,
+                "pixel_y": 850
+            },
+            "coverage_area": {
+                "min_pixel_x": 374,
+                "max_pixel_x": 2728,
+                "min_pixel_y": 965,
+                "max_pixel_y": 1030
+            },
+            "name": "下方横向走廊",
+            "description": "中间横向连接走廊监控",
+            "zone": "center_corridor"
+        },
+        {
             "camera_id": "camera6",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.161/cam/realmonitor?channel=1&subtype=0",
+            "position": {
+                "pixel_x": 1560,
+                "pixel_y": 600
+            },
+            "coverage_area": {
+                "min_pixel_x": 1622,
+                "max_pixel_x": 1802,
+                "min_pixel_y": 565,
+                "max_pixel_y": 965
+            },
+            "name": "房间间走廊（右）",
+            "description": "房间间右侧走廊监控",
+            "zone": "right_between_corridor"
+        },
+        {
+            "camera_id": "camera7",
+            "camera_url": "rtsp://admin:neu307neu307@192.168.201.162/cam/realmonitor?channel=1&subtype=0",
+            "position": {
+                "pixel_x": 1560,
+                "pixel_y": 600
+            },
+            "coverage_area": {
+                "min_pixel_x": 1622,
+                "max_pixel_x": 1802,
+                "min_pixel_y": 565,
+                "max_pixel_y": 965
+            },
+            "name": "房间间走廊（右）",
+            "description": "房间间右侧走廊监控",
+            "zone": "right_between_corridor"
+        },
+        {
+            "camera_id": "camera8",
+            "camera_url": "rtsp://admin:neu307neu307@192.168.201.163/cam/realmonitor?channel=1&subtype=0",
             "position": {
                 "pixel_x": 1560,
                 "pixel_y": 600

@@ -11,6 +11,8 @@ import numpy as np
 from qwen_vl_utils import process_vision_info
 import json
 from pathlib import Path
+import time
+import traceback
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -46,9 +48,45 @@ class VideoAnalyServer(threading.Thread):
                 if analyse_result is not None:
                     self.save_to_json(v_k, self.video_description_path, analyse_result)
             except Empty:
-                logger.info("视频队列为空，等待新的视频")
+                time.sleep(1)
                 continue
         
+    def _handle_problematic_video(self, v_k: str):
+        """处理有问题的视频：删除文件和JSON条目"""
+        with self.json_lock:
+            try:
+                # 1. Read the current data
+                with open(self.video_description_path, "r", encoding="utf-8") as f:
+                    video_data = json.load(f)
+                
+                video_info = video_data.get(v_k)
+                if not video_info:
+                    logger.warning(f"无法在JSON中找到视频记录: {v_k}，可能已被处理。")
+                    return
+
+                # 2. Delete the video file
+                video_path = video_info.get('video_path')
+                if video_path and os.path.exists(video_path):
+                    try:
+                        os.remove(video_path)
+                        logger.info(f"已删除有问题的视频文件: {video_path}")
+                    except OSError as e:
+                        logger.error(f"删除视频文件 {video_path} 失败: {e}")
+                
+                # 3. Delete the entry from the dictionary
+                del video_data[v_k]
+
+                # 4. Write the updated data back to the file
+                with open(self.video_description_path, "w", encoding="utf-8") as f:
+                    json.dump(video_data, f, ensure_ascii=False, indent=4)
+                logger.info(f"已从JSON中删除视频记录: {v_k}")
+
+            except json.JSONDecodeError:
+                logger.error(f"读写JSON文件时出错 {self.video_description_path}，文件可能已损坏。")
+            except Exception as e:
+                logger.error(f"处理有问题的视频 {v_k} 时发生未知错误: {e}")
+                logger.debug(traceback.format_exc())
+
     def analyze_video(self, v_k: str, video_description_path: str = None):
         camera_id_part, timestamp_part = v_k.split("_", 1)
         template=f"""你是一个专业的监控视频分析专家，你的分析应该是以人为主体的，环境信息是你分析人的行为时的参考。
@@ -108,6 +146,7 @@ class VideoAnalyServer(threading.Thread):
             return None
     
     def prepare_message_for_vllm(self, messages):
+        import gc
         vllm_messages, fps_list = [], []
 
         for message in messages:
@@ -119,22 +158,48 @@ class VideoAnalyServer(threading.Thread):
             new_content = []
             for part in content_list:
                 if part.get("type") == "video":
-                    video_message = [{"content": [part]}]
-                    _, video_inputs, video_kwargs = process_vision_info(video_message, return_video_kwargs=True)
-                    frames = video_inputs.pop().permute(0, 2, 3, 1).numpy().astype(np.uint8)
-                    fps_list.extend(video_kwargs.get("fps", []))
+                    try:
+                        video_message = [{"content": [part]}]
+                        _, video_inputs, video_kwargs = process_vision_info(video_message, return_video_kwargs=True)
+                        frames = video_inputs.pop().permute(0, 2, 3, 1).numpy().astype(np.uint8)
+                        fps_list.extend(video_kwargs.get("fps", []))
 
-                    b64_frames = []
-                    for frame in frames:
-                        img = Image.fromarray(frame)
-                        with BytesIO() as buf:
-                            img.save(buf, format="jpeg")
-                            b64_frames.append(base64.b64encode(buf.getvalue()).decode())
+                        # 内存优化：限制帧数
+                        max_frames = min(len(frames), 8)  # 最多8帧
+                        frames = frames[:max_frames]
+                        logger.info(f"处理视频帧数: {len(frames)}")
 
-                    new_content.append({
-                        "type": "video_url",
-                        "video_url": {"url": f"data:video/jpeg;base64,{','.join(b64_frames)}"}
-                    })
+                        b64_frames = []
+                        for i, frame in enumerate(frames):
+                            try:
+                                img = Image.fromarray(frame)
+                                with BytesIO() as buf:
+                                    # 降低质量减少内存
+                                    img.save(buf, format="jpeg", quality=60, optimize=True)
+                                    b64_frames.append(base64.b64encode(buf.getvalue()).decode())
+                                
+                                # 每处理2帧清理一次内存
+                                if (i + 1) % 2 == 0:
+                                    gc.collect()
+                                    
+                            except Exception as e:
+                                logger.error(f"处理帧 {i} 失败: {e}")
+                                continue
+
+                        new_content.append({
+                            "type": "video_url",
+                            "video_url": {"url": f"data:video/jpeg;base64,{','.join(b64_frames)}"}
+                        })
+                        
+                        # 清理大对象
+                        del frames, b64_frames, video_inputs
+                        gc.collect()
+                        
+                    except Exception as e:
+                        logger.error(f"处理视频时发生错误: {e}")
+                        logger.error(f"跳过有问题的视频处理")
+                        continue
+                        
                 else:
                     new_content.append(part)
             message["content"] = new_content
@@ -159,9 +224,19 @@ class VideoAnalyServer(threading.Thread):
 
 if __name__ == "__main__":
     video_queue = Queue()
-    video_queue.put("camera1_20250604_104536")
-    video_queue.put("camera2_20250604_104554")
-    video_queue.put("camera1_20250604_104620")
+
+    json_lock = threading.Lock()
+    with json_lock:
+        with open(os.path.join(base_dir, "video_description.json"), "r", encoding="utf-8") as f:
+            video_data = json.load(f)
+
+    for v_k, v_info in video_data.items():
+        if v_info['video_path'] is not None and v_info['analyse_result'] is None and (video_queue.qsize() < 5):
+            video_queue.put(v_k)
+        elif video_queue.qsize() >= 5:
+            break
+
+    logging.info(f"Init v_q put {video_queue.qsize()}")
 
     video_analyse_server = VideoAnalyServer(video_queue, "qwen2.5", "http://localhost:8000/v1", "token-abc123", "/root/data1/monitor_rag_project/video_process/video_description.json")
     video_analyse_server.start()

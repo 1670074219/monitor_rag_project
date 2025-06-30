@@ -6,7 +6,7 @@ import subprocess
 import time
 import logging
 
-from video_process.video_capture_server_ffmpeg import VideoCaptureServerFFmpeg
+from video_process.multi_camera_capture import VideoCaptureManager
 from video_process.video_analyse_server import VideoAnalyServer
 from video_process.faiss_server import FaissServer
 
@@ -72,8 +72,8 @@ if __name__ == "__main__":
     init_queue(video_queue, video_dsp_queue, os.path.join(base_dir, "video_description.json"))
     logger.info(f"video_queue: {list(video_queue.queue)}, video_dsp_queue: {list(video_dsp_queue.queue)}")
 
-    # 启动 VideoCaptureServerFFmpeg (使用ffmpeg直接录制H.264)
-    video_capture_server = VideoCaptureServerFFmpeg(
+    # 启动 VideoCaptureManager
+    video_capture_server = VideoCaptureManager(
         camera_config=camera_config,
         yolo_path=os.path.join(base_dir, "yolo/yolo11s.pt"),
         saved_video_path=os.path.join(base_dir, "saved_video"),

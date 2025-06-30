@@ -174,9 +174,17 @@ class FaissServer(threading.Thread):
         return ranked_results
     
     def hybrid_search(self, query: str, k: int = 5, alpha: float = 0.5):
+        start_time = time.time()
+        
+        # BM25检索
+        bm25_start = time.time()
         bm25_results = self.bm25_search(query, k * 2)
         bm25_dict = {v_k: score for v_k, score in bm25_results}
+        bm25_time = time.time() - bm25_start
+        logger.info(f"BM25检索耗时: {bm25_time:.3f}秒")
 
+        # Faiss检索
+        faiss_start = time.time()
         faiss_results = self.search(query, k * 2)
         faiss_idx_to_v_k = {}
 
@@ -194,7 +202,10 @@ class FaissServer(threading.Thread):
             if v_k:
                 sim_score = 1 / (1 + distance)
                 faiss_dict[v_k] = sim_score
+        faiss_time = time.time() - faiss_start
+        logger.info(f"Faiss检索耗时: {faiss_time:.3f}秒")
 
+        # 混合排序
         all_keys = set(bm25_dict.keys()).union(faiss_dict.keys())
         hybrid_scores = []
         for v_k in all_keys:
@@ -204,7 +215,8 @@ class FaissServer(threading.Thread):
             hybrid_scores.append((v_k, hybrid_score))
 
         hybrid_scores = sorted(hybrid_scores, key=lambda x: x[1], reverse=True)[:k]
-        logger.info(f"Hybrid 检索返回 {len(hybrid_scores)} 个结果。")
+        total_time = time.time() - start_time
+        logger.info(f"Hybrid 检索返回 {len(hybrid_scores)} 个结果。总耗时: {total_time:.3f}秒")
         return hybrid_scores
     
     def get_analyse_kv(self, idxs: list, video_description_path: str):
