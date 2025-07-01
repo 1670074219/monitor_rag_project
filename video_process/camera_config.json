@@ -3,182 +3,130 @@
         {
             "camera_id": "camera1",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.164/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 180,
-                "pixel_y": 120
-            },
-            "coverage_area": {
-                "min_pixel_x": 374,
-                "max_pixel_x": 2728,
-                "min_pixel_y": 345,
-                "max_pixel_y": 445
-            },
-            "name": "上方横向主走廊",
-            "description": "上方横向走廊监控",
-            "zone": "top_corridor"
+            "pixel_coordinate": [
+                [517, 95],
+                [667, 95],
+                [1182, 720],
+                [276, 720]
+            ],
+            "real_coordinate": [
+                [2731, 1028],
+                [2582, 1028],
+                [2582, 341],
+                [2731, 341]
+            ]
         },
         {
             "camera_id": "camera2", 
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.165/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 520,
-                "pixel_y": 280
-            },
-            "coverage_area": {
-                "min_pixel_x": 374,
-                "max_pixel_x": 574,
-                "min_pixel_y": 445,
-                "max_pixel_y": 1030
-            },
-            "name": "左侧纵向走廊",
-            "description": "左侧纵向走廊监控",
-            "zone": "left_corridor"
+            "pixel_coordinate": [
+                [591, 123],
+                [753, 123],
+                [927, 720],
+                [44, 720]
+            ],
+            "real_coordinate": [
+                [392, 510],
+                [392, 345],
+                [1558, 345],
+                [1558, 510]
+            ]
         },
         {
             "camera_id": "camera3", 
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.166/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 1000,
-                "pixel_y": 500
-            },
-            "coverage_area": {
-                "min_pixel_x": 800,
-                "max_pixel_x": 1000,
-                "min_pixel_y": 400,
-                "max_pixel_y": 600
-            },
-            "name": "左侧纵向走廊",
-            "description": "左侧纵向走廊监控",
-            "zone": "left_corridor"
+            "pixel_coordinate": [
+                [418, 73],
+                [585, 73],
+                [1265, 720],
+                [280, 720]
+            ],
+            "real_coordinate": [
+                [2723, 348],
+                [2723, 519],
+                [1558, 519],
+                [1558, 348]
+            ]
         },
         {
             "camera_id": "camera4",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.167/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 1500,
-                "pixel_y": 850
-            },
-            "coverage_area": {
-                "min_pixel_x": 374,
-                "max_pixel_x": 2728,
-                "min_pixel_y": 965,
-                "max_pixel_y": 1030
-            },
-            "name": "下方横向走廊",
-            "description": "中间横向连接走廊监控",
-            "zone": "center_corridor"
+            "pixel_coordinate": [
+                [557, 144],
+                [705, 129],
+                [1150, 720],
+                [272, 720]
+            ],
+            "real_coordinate": [
+                [1423, 1018],
+                [1298, 1018],
+                [1298, 346],
+                [1423, 346]
+            ]
         },
         {
             "camera_id": "camera5",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.168/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 1500,
-                "pixel_y": 850
-            },
-            "coverage_area": {
-                "min_pixel_x": 374,
-                "max_pixel_x": 2728,
-                "min_pixel_y": 965,
-                "max_pixel_y": 1030
-            },
-            "name": "下方横向走廊",
-            "description": "中间横向连接走廊监控",
-            "zone": "center_corridor"
+            "pixel_coordinate": [
+                [616, 127],
+                [637, 127],
+                [992, 720],
+                [516, 720]
+            ],
+            "real_coordinate": [
+                [2724, 348],
+                [2724, 422],
+                [533, 422],
+                [533, 348]
+            ]
         },
         {
             "camera_id": "camera6",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.161/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 1560,
-                "pixel_y": 600
-            },
-            "coverage_area": {
-                "min_pixel_x": 1622,
-                "max_pixel_x": 1802,
-                "min_pixel_y": 565,
-                "max_pixel_y": 965
-            },
-            "name": "房间间走廊（右）",
-            "description": "房间间右侧走廊监控",
-            "zone": "right_between_corridor"
+            "pixel_coordinate": [
+                [482, 107],
+                [639, 107],
+                [1029, 720],
+                [151, 720]
+            ],
+            "real_coordinate": [
+                [1690, 351],
+                [1816, 351],
+                [1816, 1020],
+                [1690, 1020]
+            ]
         },
         {
             "camera_id": "camera7",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.162/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 1560,
-                "pixel_y": 600
-            },
-            "coverage_area": {
-                "min_pixel_x": 1622,
-                "max_pixel_x": 1802,
-                "min_pixel_y": 565,
-                "max_pixel_y": 965
-            },
-            "name": "房间间走廊（右）",
-            "description": "房间间右侧走廊监控",
-            "zone": "right_between_corridor"
+            "pixel_coordinate": [
+                [671, 71],
+                [701, 71],
+                [935, 720],
+                [433, 720]
+            ],
+            "real_coordinate": [
+                [400, 351],
+                [525, 351],
+                [525, 1020],
+                [400, 1020]
+            ]
         },
         {
             "camera_id": "camera8",
             "camera_url": "rtsp://admin:neu307neu307@192.168.201.163/cam/realmonitor?channel=1&subtype=0",
-            "position": {
-                "pixel_x": 1560,
-                "pixel_y": 600
-            },
-            "coverage_area": {
-                "min_pixel_x": 1622,
-                "max_pixel_x": 1802,
-                "min_pixel_y": 565,
-                "max_pixel_y": 965
-            },
-            "name": "房间间走廊（右）",
-            "description": "房间间右侧走廊监控",
-            "zone": "right_between_corridor"
+            "pixel_coordinate": [
+                [498, 115],
+                [665, 115],
+                [1154, 720],
+                [223, 720]
+            ],
+            "real_coordinate": [
+                [2732, 941],
+                [2732, 1027],
+                [505, 1027],
+                [505, 941]
+            ]
         }
-    ],
-    "default_position": {
-        "pixel_x": 400,
-        "pixel_y": 250
-    },
-    "default_coverage_area": {
-        "min_pixel_x": 800,
-        "max_pixel_x": 2000,
-        "min_pixel_y": 180,
-        "max_pixel_y": 280
-    },
-    "map_info": {
-        "description": "地图坐标说明",
-        "coordinate_system": "像素坐标系，左上角为(0,0)",
-        "map_size": {
-            "width": 3156,
-            "height": 1380
-        }
-    },
-    "3d_display_config": {
-        "plane_size": {
-            "width": 20.0,
-            "height": 15.0
-        },
-        "marker_config": {
-            "normal_color": "#00ffff",
-            "abnormal_color": "#ff0000", 
-            "height": 0.8,
-            "radius": 0.15,
-            "animation": {
-                "rotation_speed": 0.02,
-                "pulse_speed": 0.03,
-                "glow_intensity": 0.5
-            }
-        },
-        "camera_position": {
-            "x": 0,
-            "y": 12,
-            "z": 8
-        },
-        "lighting": {
-            "ambient_intensity": 0.4,
-            "directional_intensity": 0.8
-        }
-    }
+    ]
 }
