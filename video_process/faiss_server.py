@@ -234,11 +234,17 @@ class FaissServer(threading.Thread):
 
 if __name__ == "__main__":
     v_dsp_q = Queue()
-    v_dsp_q.put("camera1_20250604_104536")
-    v_dsp_q.put("camera2_20250604_104554")
-    v_dsp_q.put("camera1_20250604_104620")
+
+    json_lock = threading.Lock()
+    # with json_lock:
+    #     with open("/root/data1/monitor_rag_project/video_process/video_description.json", "r", encoding="utf-8") as f:
+    #         video_data = json.load(f)
+
+    # for v_k, v_info in video_data.items():
+    #     if v_info['analyse_result'] is not None and v_info['is_embedding'] is False:
+    #         v_dsp_q.put(v_k)
     
-    print(v_dsp_q.qsize())
+    # logging.info(f"Init v_q put {v_dsp_q.qsize()}")
 
     faiss_server = FaissServer(emd_model_path="/root/data1/bge_zh_v1.5/",
                                video_dsp_queue=v_dsp_q,
@@ -248,7 +254,7 @@ if __name__ == "__main__":
     # faiss_server.start()
     # faiss_server.join()
     start_time = time.time()
-    results = faiss_server.hybrid_search("深色衣服，戴着帽子，体型较瘦", k=5, alpha=0.6)
+    results = faiss_server.hybrid_search("深色衣服，戴着帽子，体型较瘦", k=5, alpha=0.8)
     end_time = time.time()
     print(f"Hybrid 检索时间: {end_time - start_time} 秒")
     for v_k, score in results:

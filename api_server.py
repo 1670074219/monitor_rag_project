@@ -718,16 +718,9 @@ def get_3d_config():
 def get_events_3d():
     """获取3D显示用的事件数据"""
     try:
-        # 尝试读取包含轨迹的JSON文件
-        trajectory_file_path = os.path.join(os.path.dirname(__file__), "video_process", "video_description_with_trajectory.json")
-        
-        if os.path.exists(trajectory_file_path):
-            with open(trajectory_file_path, 'r', encoding='utf-8') as f:
-                video_data = json.load(f)
-        else:
-            # 备用：使用原始文件
-            with open(video_description_path, 'r', encoding='utf-8') as f:
-                video_data = json.load(f)
+        # 直接使用video_description.json文件
+        with open(video_description_path, 'r', encoding='utf-8') as f:
+            video_data = json.load(f)
         
         events = []
         
@@ -820,16 +813,9 @@ def get_events_3d():
 def get_event_trajectory(event_id):
     """获取指定事件的轨迹数据"""
     try:
-        # 尝试读取包含轨迹的JSON文件
-        trajectory_file_path = os.path.join(os.path.dirname(__file__), "video_process", "video_description_with_trajectory.json")
-        
-        if os.path.exists(trajectory_file_path):
-            with open(trajectory_file_path, 'r', encoding='utf-8') as f:
-                video_data = json.load(f)
-        else:
-            # 备用：使用原始文件
-            with open(video_description_path, 'r', encoding='utf-8') as f:
-                video_data = json.load(f)
+        # 直接使用video_description.json文件
+        with open(video_description_path, 'r', encoding='utf-8') as f:
+            video_data = json.load(f)
         
         if event_id not in video_data:
             return jsonify({'error': '事件不存在'}), 404
@@ -882,16 +868,9 @@ def convert_pixel_to_scene_coords(pixel_x, pixel_y):
 def get_event_trajectory_scene_coords(event_id):
     """获取转换为3D场景坐标的轨迹数据"""
     try:
-        # 尝试读取包含轨迹的JSON文件
-        trajectory_file_path = os.path.join(os.path.dirname(__file__), "video_process", "video_description_with_trajectory.json")
-        
-        if os.path.exists(trajectory_file_path):
-            with open(trajectory_file_path, 'r', encoding='utf-8') as f:
-                video_data = json.load(f)
-        else:
-            # 备用：使用原始文件
-            with open(video_description_path, 'r', encoding='utf-8') as f:
-                video_data = json.load(f)
+        # 直接使用video_description.json文件
+        with open(video_description_path, 'r', encoding='utf-8') as f:
+            video_data = json.load(f)
         
         if event_id not in video_data:
             return jsonify({'error': '事件不存在'}), 404

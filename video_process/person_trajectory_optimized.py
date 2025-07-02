@@ -45,6 +45,33 @@ def save_trajectory_results(results, output_path='video_process/video_descriptio
     except Exception as e:
         print(f"保存轨迹结果失败: {e}")
 
+def update_single_video_trajectory(video_name, trajectory_data, desc_path='video_process/video_description.json'):
+    """
+    更新单个视频的轨迹数据到原始JSON文件
+    """
+    try:
+        # 读取当前的视频描述文件
+        with open(desc_path, 'r', encoding='utf-8') as f:
+            descriptions = json.load(f)
+        
+        # 更新对应视频的轨迹数据
+        if video_name in descriptions:
+            descriptions[video_name]['trajectory_data'] = trajectory_data
+            
+            # 立即写回文件
+            with open(desc_path, 'w', encoding='utf-8') as f:
+                json.dump(descriptions, f, indent=4, ensure_ascii=False)
+            
+            print(f"✓ 视频 {video_name} 的轨迹数据已更新到 {desc_path}")
+            return True
+        else:
+            print(f"❌ 在描述文件中未找到视频 {video_name}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ 更新视频 {video_name} 轨迹数据失败: {e}")
+        return False
+
 def extract_camera_id_from_video_name(video_name):
     """
     从视频名称中提取摄像头ID
@@ -269,46 +296,59 @@ def main():
         print(f"加载 DeepSORT 特征提取器失败: {e}")
         return
 
-    # 3. 处理每个视频
-    results = {}
+    # 3. 逐个处理每个视频并立即保存
+    processed_count = 0
+    total_videos = len(video_descriptions)
+    
+    print(f"\n总共需要处理 {total_videos} 个视频")
+    print("=" * 60)
     
     for video_name, video_info in video_descriptions.items():
+        processed_count += 1
+        print(f"\n[{processed_count}/{total_videos}] 正在处理: {video_name}")
+        
         # 提取摄像头ID
         camera_id = extract_camera_id_from_video_name(video_name)
         if not camera_id:
-            print(f"无法从视频名称 {video_name} 中提取摄像头ID，跳过")
+            print(f"❌ 无法从视频名称 {video_name} 中提取摄像头ID，跳过")
             continue
         
         # 获取摄像头配置
         camera_config = get_camera_config_by_id(camera_configs, camera_id)
         if not camera_config:
-            print(f"未找到摄像头 {camera_id} 的配置，跳过")
+            print(f"❌ 未找到摄像头 {camera_id} 的配置，跳过")
             continue
         
         # 检查视频文件是否存在
         video_path = video_info['video_path']
         if not os.path.exists(video_path):
-            print(f"视频文件不存在: {video_path}，跳过")
+            print(f"❌ 视频文件不存在: {video_path}，跳过")
             continue
         
         # 处理视频
         trajectory_data = process_single_video(video_path, camera_config, yolo_model, feature_extractor)
         
-        # 保存结果
-        results[video_name] = video_info.copy()
+        # 准备轨迹数据
         if trajectory_data:
-            results[video_name]['trajectory_data'] = trajectory_data
+            final_trajectory_data = trajectory_data
         else:
-            results[video_name]['trajectory_data'] = {
+            final_trajectory_data = {
                 "person_count": 0,
                 "trajectories": [],
                 "coordinate_system": "real_world",
                 "unit": "centimeters"
             }
+        
+        # 立即更新JSON文件
+        success = update_single_video_trajectory(video_name, final_trajectory_data)
+        if success:
+            print(f"✓ 进度: {processed_count}/{total_videos} 完成")
+        else:
+            print(f"❌ 更新失败，但继续处理下一个视频")
     
-    # 4. 保存结果
-    save_trajectory_results(results)
-    print(f"\n处理完成！共处理了 {len(results)} 个视频")
+    print("\n" + "=" * 60)
+    print(f"🎉 全部处理完成！共处理了 {processed_count} 个视频")
+    print(f"📁 结果已直接保存到: video_process/video_description.json")
 
 if __name__ == '__main__':
     main() 
