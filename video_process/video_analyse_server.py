@@ -13,12 +13,47 @@ import json
 from pathlib import Path
 import time
 import traceback
+import cv2
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 base_dir = os.path.dirname(__file__)
+
+def get_video_duration(video_path: str) -> float:
+    """
+    获取视频时长（秒）
+    
+    Args:
+        video_path: 视频文件路径
+        
+    Returns:
+        视频时长（秒），如果获取失败返回-1
+    """
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error(f"无法打开视频文件: {video_path}")
+            return -1
+        
+        # 获取总帧数和帧率
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        cap.release()
+        
+        if fps > 0:
+            duration = frame_count / fps
+            logger.info(f"视频 {os.path.basename(video_path)} 时长: {duration:.2f}秒 ({duration/60:.2f}分钟)")
+            return duration
+        else:
+            logger.error(f"无法获取视频帧率: {video_path}")
+            return -1
+            
+    except Exception as e:
+        logger.error(f"获取视频时长失败 {video_path}: {e}")
+        return -1
 
 class VideoAnalyServer(threading.Thread):
     def __init__(self,
@@ -94,8 +129,67 @@ class VideoAnalyServer(threading.Thread):
                 video_data = json.load(f)
             return video_data.get(v_k)
 
+    def mark_video_as_skipped(self, v_k: str, reason: str):
+        """将视频标记为跳过分析"""
+        with self.json_lock:
+            try:
+                with open(self.video_description_path, "r", encoding="utf-8") as f:
+                    video_data = json.load(f)
+                
+                if v_k in video_data:
+                    # 更新分析结果为跳过原因
+                    skip_message = f"跳过分析: {reason}"
+                    video_data[v_k]['analyse_result'] = skip_message
+                    
+                    with open(self.video_description_path, "w", encoding="utf-8") as f:
+                        json.dump(video_data, f, ensure_ascii=False, indent=4)
+                    
+                    logger.info(f"已标记视频 {v_k} 为跳过: {reason}")
+                    return True
+                else:
+                    logger.error(f"无法找到视频记录: {v_k}")
+                    return False
+                    
+            except json.JSONDecodeError:
+                logger.error(f"读写JSON文件时出错 {self.video_description_path}")
+                return False
+            except Exception as e:
+                logger.error(f"标记跳过视频失败: {e}")
+                return False
+
     def analyze_video(self, v_k: str, video_description_path: str = None):
         camera_id_part, timestamp_part = v_k.split("_", 1)
+        
+        # 只获取当前视频的信息，避免加载整个JSON
+        video_info = self.get_video_info(v_k)
+        if not video_info:
+            logger.error(f"无法找到视频信息: {v_k}")
+            return None
+
+        video_path = video_info['video_path']
+        
+        # 检查视频文件是否存在
+        if not os.path.exists(video_path):
+            logger.error(f"视频文件不存在: {video_path}")
+            self.mark_video_as_skipped(v_k, "视频文件不存在")
+            return None
+        
+        # 检查视频时长
+        duration = get_video_duration(video_path)
+        if duration == -1:
+            logger.error(f"无法获取视频时长: {video_path}")
+            self.mark_video_as_skipped(v_k, "无法获取视频时长")
+            return None
+        
+        # 跳过超过10分钟的视频
+        MAX_DURATION = 600  # 10分钟 = 600秒
+        if duration > MAX_DURATION:
+            logger.warning(f"视频时长超过{MAX_DURATION/60}分钟，跳过分析: {v_k} (时长: {duration/60:.2f}分钟)")
+            self.mark_video_as_skipped(v_k, f"视频时长超过{MAX_DURATION/60}分钟 (实际时长: {duration/60:.2f}分钟)")
+            return None
+        
+        logger.info(f"视频时长检查通过，开始分析: {v_k} (时长: {duration:.2f}秒)")
+        
         template=f"""你是一个专业的监控视频分析专家，你的分析应该是以人为主体的，环境信息是你分析人的行为时的参考。
                     请分析以下视频内容，并严格按照以下格式输出：
                     要求输出的描述要详细，不要遗漏任何细节。
@@ -120,12 +214,6 @@ class VideoAnalyServer(threading.Thread):
                     与环境的交互：[描述人物与环境的交互情况，如果没有交互请说明无交互]
                     视频总结：摄像头{camera_id_part}在{timestamp_part}的监控视频分析报告：一个[人物1的外貌]在[人物1的行为]，一个[人物2的外貌]在[人物2的行为]，他们与环境[此处填写环境信息]发生了[此处填写交互情况]。
                     """
-        
-        # 只获取当前视频的信息，避免加载整个JSON
-        video_info = self.get_video_info(v_k)
-        if not video_info:
-            logger.error(f"无法找到视频信息: {v_k}")
-            return None
 
         messages = [
             {"role": "system", "content": "你是一个专业的监控视频分析专家，你的分析应该是以人为主体的，环境信息是你分析人的行为时的参考"},
@@ -133,7 +221,7 @@ class VideoAnalyServer(threading.Thread):
                 {"type": "text", "text": template},
                 {
                     "type": "video",
-                    "video": video_info['video_path'],
+                    "video": video_path,
                     "total_pixels": 20480 * 28 * 28,
                     "min_pixels": 16 * 28 * 2,
                     "fps": 3.0
@@ -234,19 +322,19 @@ class VideoAnalyServer(threading.Thread):
                 logger.info(f"已放入embedding队列:{v_k}")
 
 def get_unprocessed_videos(json_path: str, max_count: int = 5):
-    """只获取未处理的视频列表，避免加载所有数据到内存"""
+    """只获取未处理的视频列表，排除已跳过的视频"""
     unprocessed_videos = []
     
     with open(json_path, "r", encoding="utf-8") as f:
-        # 逐行读取JSON，避免一次性加载整个文件
-        # 注意：这需要JSON格式化为每行一个条目，或者使用ijson库
-        # 这里先保持原有逻辑，但标记需要优化
         video_data = json.load(f)
     
     count = 0
     for v_k, v_info in video_data.items():
+        analyse_result = v_info.get('analyse_result')
+        
+        # 排除已跳过的视频和已分析的视频
         if (v_info.get('video_path') is not None and 
-            v_info.get('analyse_result') is None and 
+            (analyse_result is None or analyse_result == '') and 
             count < max_count):
             unprocessed_videos.append(v_k)
             count += 1
@@ -256,12 +344,63 @@ def get_unprocessed_videos(json_path: str, max_count: int = 5):
     logger.info(f"找到 {len(unprocessed_videos)} 个未处理的视频")
     return unprocessed_videos
 
+def get_json_stats(json_path: str):
+    """获取JSON文件的统计信息"""
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            video_data = json.load(f)
+        
+        total_count = len(video_data)
+        analyzed_count = 0
+        skipped_count = 0
+        unanalyzed_count = 0
+        skip_reasons = {}
+        
+        for v_k, v_info in video_data.items():
+            analyse_result = v_info.get('analyse_result')
+            
+            if analyse_result is None or analyse_result == '':
+                unanalyzed_count += 1
+            elif analyse_result.startswith('跳过分析:'):
+                skipped_count += 1
+                # 统计跳过原因
+                if analyse_result in skip_reasons:
+                    skip_reasons[analyse_result] += 1
+                else:
+                    skip_reasons[analyse_result] = 1
+            else:
+                analyzed_count += 1
+        
+        logger.info(f"📊 JSON文件统计信息:")
+        logger.info(f"  总记录数: {total_count}")
+        logger.info(f"  ✅ 已分析: {analyzed_count}")
+        logger.info(f"  ⏸️ 跳过分析: {skipped_count}")
+        logger.info(f"  ⏳ 待分析: {unanalyzed_count}")
+        
+        if total_count > 0:
+            progress = (analyzed_count / total_count) * 100
+            logger.info(f"  📈 分析进度: {progress:.2f}%")
+        
+        if skip_reasons:
+            logger.info(f"  🚫 跳过原因统计:")
+            for reason, count in sorted(skip_reasons.items(), key=lambda x: x[1], reverse=True):
+                logger.info(f"    - {reason}: {count} 个视频")
+        
+        return total_count, analyzed_count, skipped_count, unanalyzed_count
+        
+    except Exception as e:
+        logger.error(f"获取JSON统计信息失败: {e}")
+        return 0, 0, 0, 0
+
 if __name__ == "__main__":
     video_queue = Queue()
     json_path = os.path.join(base_dir, "video_description.json")
     
+    # 获取JSON文件统计信息
+    get_json_stats(json_path)
+    
     # 使用优化的方法获取未处理视频列表
-    unprocessed_videos = get_unprocessed_videos(json_path, max_count=5)
+    unprocessed_videos = get_unprocessed_videos(json_path, max_count=10000)
     
     for v_k in unprocessed_videos:
         video_queue.put(v_k)
