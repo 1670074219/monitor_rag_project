@@ -43,6 +43,46 @@
                 {{ currentTrajectoryEventId === selectedEvent.id ? '🛤️ 隐藏轨迹' : '🛤️ 显示轨迹' }}
               </button>
               
+              <button
+                v-if="selectedEvent.has_trajectory"
+                @click="showGlobalTrajectory(selectedEvent.id)"
+                :class="['global-trajectory-button', { 'active': isGlobalTrajectoryMode }]"
+                :disabled="isGlobalTrajectoryLoading"
+              >
+                {{ isGlobalTrajectoryLoading ? '🔍 搜索中...' : (isGlobalTrajectoryMode ? '🌐 隐藏全局轨迹' : '🌐 全局轨迹') }}
+              </button>
+              
+              <!-- 搜索参数调整 -->
+              <div v-if="selectedEvent.has_trajectory" class="search-params">
+                <details class="search-config">
+                  <summary>🔧 搜索参数调整</summary>
+                  <div class="param-controls">
+                    <div class="param-item">
+                      <label>相似度阈值: {{ searchParams.threshold }}</label>
+                      <input type="range" v-model.number="searchParams.threshold" min="0.1" max="0.8" step="0.1" />
+                      <span class="param-desc">越低越容易找到相关事件</span>
+                    </div>
+                    
+                    <div class="param-item">
+                      <label>关键词权重: {{ searchParams.keywordWeight.toFixed(1) }}</label>
+                      <input type="range" v-model.number="searchParams.keywordWeight" min="0.1" max="0.9" step="0.1" @input="adjustWeights('keyword')" />
+                    </div>
+                    
+                    <div class="param-item">
+                      <label>语义权重: {{ searchParams.semanticWeight.toFixed(1) }}</label>
+                      <input type="range" v-model.number="searchParams.semanticWeight" min="0.1" max="0.9" step="0.1" @input="adjustWeights('semantic')" />
+                      <span class="param-desc">权重之和 = {{ (searchParams.keywordWeight + searchParams.semanticWeight).toFixed(1) }}</span>
+                    </div>
+                    
+                    <div class="param-presets">
+                      <button @click="setPreset('easy')" class="preset-btn">宽松搜索</button>
+                      <button @click="setPreset('normal')" class="preset-btn">正常搜索</button>
+                      <button @click="setPreset('strict')" class="preset-btn">严格搜索</button>
+                    </div>
+                  </div>
+                </details>
+              </div>
+              
               <span v-else-if="!selectedEvent.has_trajectory" class="no-trajectory-hint">
                 此事件无轨迹数据
               </span>
@@ -175,9 +215,20 @@ const weeklyAbnormalData = ref([])
 
 // 轨迹相关状态
 const currentTrajectoryEventId = ref(null)
+const isGlobalTrajectoryMode = ref(false)
+const isGlobalTrajectoryLoading = ref(false)
+const globalTrajectoryEventIds = ref([])
+const globalTrajectoryTargetEventId = ref(null) // 目标事件ID
+
+// 搜索参数配置
+const searchParams = ref({
+  threshold: 0.3,      // 相似度阈值（默认宽松）
+  keywordWeight: 0.5,  // 关键词权重
+  semanticWeight: 0.5  // 语义权重
+})
 // 直接使用区域随机布局
 
-const timeWindow = 600; // 调整时间窗口到2分钟（120秒）
+const timeWindow = 120; // 调整时间窗口到2分钟（120秒）
 
 const visibleEvents = computed(() => {
   if (!events.value || events.value.length === 0) {
@@ -208,7 +259,7 @@ const visibleEvents = computed(() => {
   
   // 然后按时间窗口过滤
   const currentFilterTime = absoluteTimestampForFiltering.value;
-  const filteredEvents = selectedDateEvents.filter(event => {
+  const timeFilteredEvents = selectedDateEvents.filter(event => {
     const diff = Math.abs(event.timestamp - currentFilterTime);
     const isInWindow = diff <= timeWindow;
     if (!isInWindow) {
@@ -217,8 +268,25 @@ const visibleEvents = computed(() => {
     return isInWindow;
   });
   
-  console.log(`时间窗口过滤后显示 ${filteredEvents.length} 个事件`);
-  return filteredEvents;
+  console.log(`时间窗口过滤后显示 ${timeFilteredEvents.length} 个事件`);
+  
+  // 全局轨迹模式过滤：只显示相关事件
+  if (isGlobalTrajectoryMode.value && globalTrajectoryEventIds.value.length > 0) {
+    const relatedEventIds = new Set([
+      ...globalTrajectoryEventIds.value, // 相关事件ID
+      globalTrajectoryTargetEventId.value // 目标事件ID
+    ].filter(Boolean)); // 过滤掉null/undefined
+    
+    const globalFilteredEvents = timeFilteredEvents.filter(event => 
+      relatedEventIds.has(event.id)
+    );
+    
+    console.log(`全局轨迹模式过滤后显示 ${globalFilteredEvents.length} 个相关事件`);
+    console.log('显示的相关事件IDs:', globalFilteredEvents.map(e => e.id));
+    return globalFilteredEvents;
+  }
+  
+  return timeFilteredEvents;
 });
 
 const abnormalVisibleEvents = computed(() => {
@@ -348,6 +416,115 @@ const toggleTrajectory = async (eventId) => {
     
   } catch (error) {
     console.error('切换轨迹显示失败:', error);
+  }
+};
+
+// 全局轨迹显示
+const showGlobalTrajectory = async (eventId) => {
+  if (!threeDMap.value) {
+    console.warn('ThreeDMap component not ready');
+    return;
+  }
+
+  try {
+    if (isGlobalTrajectoryMode.value) {
+      // 隐藏全局轨迹
+      console.log('隐藏全局轨迹，恢复显示所有事件');
+      await threeDMap.value.hideGlobalTrajectory();
+      isGlobalTrajectoryMode.value = false;
+      globalTrajectoryEventIds.value = [];
+      globalTrajectoryTargetEventId.value = null;
+      return;
+    }
+
+    isGlobalTrajectoryLoading.value = true;
+    console.log(`搜索与事件 ${eventId} 相关的全局轨迹`);
+
+    // 调用API搜索相关事件 - 使用动态搜索参数
+    const params = new URLSearchParams({
+      date: selectedDate.value,
+      threshold: searchParams.value.threshold,
+      keyword_weight: searchParams.value.keywordWeight,
+      semantic_weight: searchParams.value.semanticWeight,
+      max_results: 15
+    });
+    const response = await fetch(`/api/related_events/${eventId}?${params}`);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const relatedEvents = await response.json();
+    console.log(`找到 ${relatedEvents.length} 个相关事件:`, relatedEvents);
+
+    if (relatedEvents.length === 0) {
+      alert('未找到相关事件');
+      return;
+    }
+
+    // 显示所有相关事件的轨迹
+    const eventIds = relatedEvents.map(event => event.event_id);
+    globalTrajectoryEventIds.value = eventIds;
+    globalTrajectoryTargetEventId.value = eventId; // 保存目标事件ID
+    
+    const success = await threeDMap.value.showGlobalTrajectory(eventIds);
+    
+    if (success) {
+      isGlobalTrajectoryMode.value = true;
+      console.log(`全局轨迹显示成功: ${eventIds.length} 个相关事件 + 1个目标事件`);
+      console.log(`目标事件: ${eventId}, 相关事件: ${eventIds.join(', ')}`);
+    } else {
+      console.error('全局轨迹显示失败');
+    }
+
+  } catch (error) {
+    console.error('显示全局轨迹失败:', error);
+    alert(`显示全局轨迹失败: ${error.message}`);
+    // 出错时清理状态
+    isGlobalTrajectoryMode.value = false;
+    globalTrajectoryEventIds.value = [];
+    globalTrajectoryTargetEventId.value = null;
+  } finally {
+    isGlobalTrajectoryLoading.value = false;
+  }
+};
+
+// 搜索参数预设
+const setPreset = (presetType) => {
+  switch (presetType) {
+    case 'easy':
+      searchParams.value = {
+        threshold: 0.2,
+        keywordWeight: 0.7,
+        semanticWeight: 0.3
+      };
+      break;
+    case 'normal':
+      searchParams.value = {
+        threshold: 0.4,
+        keywordWeight: 0.5,
+        semanticWeight: 0.5
+      };
+      break;
+    case 'strict':
+      searchParams.value = {
+        threshold: 0.6,
+        keywordWeight: 0.3,
+        semanticWeight: 0.7
+      };
+      break;
+  }
+  console.log(`搜索参数已设置为${presetType}模式:`, searchParams.value);
+};
+
+// 自动调整权重确保总和为1
+const adjustWeights = (changedType) => {
+  const total = searchParams.value.keywordWeight + searchParams.value.semanticWeight;
+  if (total > 1) {
+    if (changedType === 'keyword') {
+      searchParams.value.semanticWeight = Math.max(0.1, 1 - searchParams.value.keywordWeight);
+    } else {
+      searchParams.value.keywordWeight = Math.max(0.1, 1 - searchParams.value.semanticWeight);
+    }
   }
 };
 
@@ -860,6 +1037,34 @@ onMounted(async () => {
         }
     }
     
+    .global-trajectory-button {
+        background-color: #722ed1;
+        color: white;
+        
+        &.active {
+            background-color: #ff4d4f;
+        }
+        
+        &:hover {
+            background-color: #9254de;
+        }
+        
+        &.active:hover {
+            background-color: #ff7875;
+        }
+        
+        &:disabled {
+            background-color: #666;
+            cursor: not-allowed;
+            
+            &:hover {
+                background-color: #666;
+                transform: none;
+                box-shadow: none;
+            }
+        }
+    }
+    
     .no-trajectory-hint {
         color: #666;
         font-size: 0.8em;
@@ -868,6 +1073,102 @@ onMounted(async () => {
         background-color: rgba(0, 0, 0, 0.2);
         border-radius: 4px;
         text-align: center;
+    }
+    
+    .search-params {
+        margin-top: 10px;
+    }
+    
+    .search-config {
+        background-color: rgba(0, 0, 0, 0.3);
+        border-radius: 4px;
+        padding: 8px;
+        
+        summary {
+            color: #00ffff;
+            cursor: pointer;
+            font-size: 0.85em;
+            padding: 4px;
+            border-radius: 3px;
+            
+            &:hover {
+                background-color: rgba(0, 255, 255, 0.1);
+            }
+        }
+    }
+    
+    .param-controls {
+        margin-top: 10px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+    }
+    
+    .param-item {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        
+        label {
+            color: #fff;
+            font-size: 0.8em;
+            font-weight: 500;
+        }
+        
+        input[type="range"] {
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 2px;
+            outline: none;
+            
+            &::-webkit-slider-thumb {
+                appearance: none;
+                width: 12px;
+                height: 12px;
+                background: #00ffff;
+                border-radius: 50%;
+                cursor: pointer;
+            }
+            
+            &::-moz-range-thumb {
+                width: 12px;
+                height: 12px;
+                background: #00ffff;
+                border-radius: 50%;
+                border: none;
+                cursor: pointer;
+            }
+        }
+        
+        .param-desc {
+            color: #999;
+            font-size: 0.7em;
+            font-style: italic;
+        }
+    }
+    
+    .param-presets {
+        display: flex;
+        gap: 4px;
+        margin-top: 8px;
+        
+        .preset-btn {
+            flex: 1;
+            padding: 4px 8px;
+            background-color: rgba(0, 255, 255, 0.2);
+            color: #00ffff;
+            border: 1px solid rgba(0, 255, 255, 0.3);
+            border-radius: 3px;
+            font-size: 0.7em;
+            cursor: pointer;
+            transition: all 0.2s;
+            
+            &:hover {
+                background-color: rgba(0, 255, 255, 0.3);
+                border-color: #00ffff;
+            }
+        }
     }
     .no-selection {
         flex-grow: 0; // Don't let it grow too much initially

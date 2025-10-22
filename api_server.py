@@ -931,13 +931,175 @@ def get_event_trajectory_scene_coords(event_id):
         logger.error(f"获取场景坐标轨迹数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
 
+@app.route('/api/related_events/<event_id>')
+def get_related_events(event_id):
+    """获取与指定事件相关的其他事件"""
+    try:
+        # 获取查询参数
+        date = request.args.get('date')
+        threshold = float(request.args.get('threshold', 0.6))  # 相似度阈值
+        keyword_weight = float(request.args.get('keyword_weight', 0.3))  # 关键词权重
+        semantic_weight = float(request.args.get('semantic_weight', 0.7))  # 语义权重
+        max_results = int(request.args.get('max_results', 10))
+        
+        # 读取事件数据
+        with open(video_description_path, 'r', encoding='utf-8') as f:
+            video_data = json.load(f)
+        
+        if event_id not in video_data:
+            return jsonify({'error': '事件不存在'}), 404
+        
+        target_event = video_data[event_id]
+        target_content = target_event.get('analyse_result', '')
+        
+        if not target_content:
+            return jsonify([])  # 如果目标事件没有描述，返回空列表
+        
+        related_events = []
+        
+        # 提取关键词（简单的关键词提取）
+        target_keywords = extract_keywords(target_content)
+        
+        for video_key, video_info in video_data.items():
+            if video_key == event_id:
+                continue  # 跳过自己
+                
+            # 按日期过滤（如果提供了日期参数）
+            if date:
+                try:
+                    event_timestamp = parse_video_key_to_timestamp(video_key)
+                    event_date = datetime.fromtimestamp(event_timestamp).strftime('%Y-%m-%d')
+                    if event_date != date:
+                        continue
+                except:
+                    continue
+            
+            content = video_info.get('analyse_result', '')
+            if not content:
+                continue
+            
+            # 计算相似度得分
+            keyword_score = calculate_keyword_similarity(target_keywords, content)
+            semantic_score = calculate_semantic_similarity(target_content, content)
+            
+            # 加权求和
+            total_score = keyword_weight * keyword_score + semantic_weight * semantic_score
+            
+            if total_score >= threshold:
+                related_events.append({
+                    'event_id': video_key,
+                    'content': content,
+                    'keyword_score': round(keyword_score, 3),
+                    'semantic_score': round(semantic_score, 3),
+                    'total_score': round(total_score, 3),
+                    'timestamp': parse_video_key_to_timestamp(video_key),
+                    'camera_id': get_camera_id_from_key(video_key)
+                })
+        
+        # 按得分排序并限制结果数量
+        related_events.sort(key=lambda x: x['total_score'], reverse=True)
+        related_events = related_events[:max_results]
+        
+        logger.info(f"找到 {len(related_events)} 个与事件 {event_id} 相关的事件")
+        return jsonify(related_events)
+        
+    except Exception as e:
+        logger.error(f"获取相关事件错误: {str(e)}")
+        return jsonify({'error': '服务器错误'}), 500
 
+def extract_keywords(text):
+    """提取关键词"""
+    try:
+        import jieba
+        
+        # 定义停用词
+        stop_words = {'的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这'}
+        
+        # 使用jieba分词
+        words = jieba.cut(text)
+        
+        # 过滤关键词
+        keywords = []
+        for word in words:
+            word = word.strip()
+            if len(word) > 1 and word not in stop_words and word.isalpha():
+                keywords.append(word)
+        
+        return keywords
+        
+    except ImportError:
+        logger.warning("jieba库未安装，使用简单分词替代")
+        # 简单的fallback分词：基于标点符号和空格
+        import re
+        
+        # 定义停用词
+        stop_words = {'的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这'}
+        
+        # 使用正则表达式进行简单分词
+        words = re.findall(r'[\u4e00-\u9fff]+', text)  # 提取中文字符
+        
+        # 过滤关键词
+        keywords = []
+        for word in words:
+            if len(word) > 1 and word not in stop_words:
+                keywords.append(word)
+        
+        return keywords
 
+def calculate_keyword_similarity(target_keywords, content):
+    """计算关键词相似度"""
+    if not target_keywords:
+        return 0.0
+    
+    content_keywords = extract_keywords(content)
+    if not content_keywords:
+        return 0.0
+    
+    # 计算交集
+    common_keywords = set(target_keywords) & set(content_keywords)
+    
+    # Jaccard相似度
+    union_keywords = set(target_keywords) | set(content_keywords)
+    similarity = len(common_keywords) / len(union_keywords) if union_keywords else 0.0
+    
+    return similarity
 
+def calculate_semantic_similarity(text1, text2):
+    """计算语义相似度"""
+    try:
+        if not faiss_server:
+            return 0.0
+        
+        # 使用FAISS服务器的嵌入模型计算相似度
+        embedding1 = faiss_server.embedding_model.encode([text1])
+        embedding2 = faiss_server.embedding_model.encode([text2])
+        
+        # 计算余弦相似度
+        import numpy as np
+        
+        # 归一化向量
+        embedding1 = embedding1 / np.linalg.norm(embedding1, axis=1, keepdims=True)
+        embedding2 = embedding2 / np.linalg.norm(embedding2, axis=1, keepdims=True)
+        
+        # 计算余弦相似度
+        similarity = np.dot(embedding1, embedding2.T)[0][0]
+        
+        return float(similarity)
+        
+    except Exception as e:
+        logger.error(f"计算语义相似度错误: {str(e)}")
+        return 0.0
 
-
-
-
+def get_camera_id_from_key(video_key):
+    """从视频键中提取摄像头ID"""
+    try:
+        # video_key格式: camera1_20250623_094842
+        parts = video_key.split('_')
+        if len(parts) >= 1:
+            return parts[0]
+        return 'unknown'
+    except:
+        return 'unknown'
 
 if __name__ == '__main__':
     logger.info("正在启动API服务器...")

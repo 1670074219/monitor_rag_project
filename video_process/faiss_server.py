@@ -26,7 +26,7 @@ class FaissServer(threading.Thread):
                  index_path: str = None):
         super().__init__(daemon=True)
         self.emd_model_path = emd_model_path
-        self.emd_model = SentenceTransformer(self.emd_model_path, device='cuda:2')
+        self.embedding_model = SentenceTransformer(self.emd_model_path, device='cuda:2')
         self.index_path = index_path or os.path.join(base_dir, "faiss_cache/faiss_ifl2.index")
         self.index = faiss.read_index(self.index_path) if os.path.exists(self.index_path) else None
         self.buffer_size = buffer_size
@@ -52,7 +52,7 @@ class FaissServer(threading.Thread):
                 video_data = json.load(f)
 
         if video_data[v_k]['is_embedding'] is not True:
-            embeddings = self.emd_model.encode([video_data[v_k]['analyse_result']]).astype('float32')
+            embeddings = self.embedding_model.encode([video_data[v_k]['analyse_result']]).astype('float32')
 
             if self.index is None:
                 embedding_dim = embeddings.shape[1]
@@ -151,7 +151,7 @@ class FaissServer(threading.Thread):
             logger.warning("Index is empty. Cannot perform search.")
             return []
 
-        query_embedding = self.emd_model.encode([query]).astype('float32')
+        query_embedding = self.embedding_model.encode([query]).astype('float32')
         distances, indices = self.index.search(query_embedding, k)
 
         results = []
@@ -259,6 +259,25 @@ if __name__ == "__main__":
     print(f"Hybrid 检索时间: {end_time - start_time} 秒")
     for v_k, score in results:
         print(f"视频: {v_k}, Hybrid分数: {score}\n")
+    
+    # 测试语义相似度计算
+    if hasattr(faiss_server, 'embedding_model'):
+        print("测试语义相似度计算...")
+        text1 = "一个人在走廊里走"
+        text2 = "有个人在过道上移动"
+        
+        try:
+            embedding1 = faiss_server.embedding_model.encode([text1])
+            embedding2 = faiss_server.embedding_model.encode([text2])
+            embedding1 = embedding1 / np.linalg.norm(embedding1, axis=1, keepdims=True)
+            embedding2 = embedding2 / np.linalg.norm(embedding2, axis=1, keepdims=True)
+            similarity = np.dot(embedding1, embedding2.T)[0][0]
+            print(f"'{text1}' 和 '{text2}' 的相似度: {similarity:.4f}")
+        except Exception as e:
+            print(f"语义相似度计算测试失败: {e}")
+            
+    else:
+        print("FaissServer没有 embedding_model 属性")
 
 
 

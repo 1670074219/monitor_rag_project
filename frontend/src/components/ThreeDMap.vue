@@ -6,6 +6,9 @@
 import { ref, onMounted, onBeforeUnmount, shallowRef } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
+import { Line2 } from 'three/examples/jsm/lines/Line2.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
 
 // 场景元素 - 使用 shallowRef 来避免深层代理
 const container = ref(null)
@@ -24,6 +27,8 @@ const isFloorplanLoaded = ref(false)
 // 轨迹线条管理
 const trajectoryLines = shallowRef([])
 const currentTrajectoryEventId = ref(null)
+const globalTrajectoryLines = shallowRef([])
+const isGlobalTrajectoryMode = ref(false)
 
 // Store floorplan dimensions for coordinate conversion
 const floorplanImageWidth = ref(0)
@@ -224,24 +229,27 @@ const createTrajectoryLine = (coordinates, color, trackId) => {
   }
 
   try {
-    // 将坐标转换为Three.js Vector3数组
-    const points = coordinates.map(coord => 
-      new THREE.Vector3(coord.x, coord.y + 0.05, coord.z) // 稍微抬高一点，避免与地面重叠
-    )
+    const positions = [];
+    coordinates.forEach(coord => {
+      positions.push(coord.x, coord.y + 0.05, coord.z); // 稍微抬高一点
+    });
 
-    // 创建线条几何体
-    const geometry = new THREE.BufferGeometry().setFromPoints(points)
-    
-    // 创建线条材质
-    const material = new THREE.LineBasicMaterial({
-      color: color,
-      linewidth: 3,
+    const geometry = new LineGeometry();
+    geometry.setPositions(positions);
+
+    const material = new LineMaterial({
+      color: new THREE.Color(color),
+      linewidth: 3, // in pixels
+      dashed: false,
       transparent: true,
-      opacity: 0.8
-    })
+      opacity: 0.8,
+    });
+    material.resolution.set(container.value.clientWidth, container.value.clientHeight);
 
-    // 创建线条对象
-    const line = new THREE.Line(geometry, material)
+    const line = new Line2(geometry, material);
+    line.computeLineDistances();
+    line.scale.set(1, 1, 1);
+
     line.userData = {
       trackId: trackId,
       type: 'trajectory',
@@ -250,12 +258,6 @@ const createTrajectoryLine = (coordinates, color, trackId) => {
     }
 
     // 添加轨迹点标记（可选）
-    const pointMaterial = new THREE.MeshBasicMaterial({
-      color: color,
-      transparent: true,
-      opacity: 0.6
-    })
-    
     coordinates.forEach((coord, index) => {
       // 起点和终点使用不同大小的球体
       const isStart = index === 0
@@ -263,13 +265,22 @@ const createTrajectoryLine = (coordinates, color, trackId) => {
       const radius = isStart || isEnd ? 0.08 : 0.04
       
       const pointGeometry = new THREE.SphereGeometry(radius, 8, 6)
-      const point = new THREE.Mesh(pointGeometry, pointMaterial.clone())
       
+      // 为每个点创建独立的材质
+      let pointColor = color
       if (isStart) {
-        point.material.color.setHex(0x00ff00) // 起点绿色
+        pointColor = '#00ff00' // 起点绿色
       } else if (isEnd) {
-        point.material.color.setHex(0xff0000) // 终点红色
+        pointColor = '#ff0000' // 终点红色
       }
+      
+      const pointMaterial = new THREE.MeshBasicMaterial({
+        color: pointColor,
+        transparent: true,
+        opacity: 0.6
+      })
+      
+      const point = new THREE.Mesh(pointGeometry, pointMaterial)
       
       point.position.set(coord.x, coord.y + 0.06, coord.z)
       point.userData = {
@@ -374,6 +385,215 @@ const clearTrajectories = () => {
   trajectoryLines.value = []
   currentTrajectoryEventId.value = null
   console.log('已清除所有轨迹线条')
+}
+
+// 显示全局轨迹
+const showGlobalTrajectory = async (eventIds) => {
+  if (!isFloorplanLoaded.value) {
+    console.warn('平面图未加载，无法显示全局轨迹')
+    return false
+  }
+
+  try {
+    console.log(`开始加载全局轨迹，事件IDs: ${eventIds.join(', ')}`)
+    
+    // 清除所有现有轨迹
+    clearTrajectories()
+    clearGlobalTrajectories()
+    
+    const allTrajectoryLines = []
+    const trajectoryColors = [
+      '#ff4444',  // 红色
+      '#44ff44',  // 绿色  
+      '#4444ff',  // 蓝色
+      '#ffff44',  // 黄色
+      '#ff44ff',  // 紫色
+      '#44ffff',  // 青色
+      '#ff8844',  // 橙色
+      '#8844ff',  // 紫罗兰
+      '#44ff88',  // 青绿
+      '#ff4488'   // 洋红
+    ]
+    
+    // 为每个事件获取轨迹数据
+    for (let i = 0; i < eventIds.length; i++) {
+      const eventId = eventIds[i]
+      
+      try {
+        const response = await fetch(`/api/trajectory/${eventId}/scene_coords`)
+        
+        if (!response.ok) {
+          console.warn(`获取事件 ${eventId} 轨迹数据失败`)
+          continue
+        }
+
+        const trajectoryData = await response.json()
+        
+        if (!trajectoryData.trajectories || trajectoryData.trajectories.length === 0) {
+          console.warn(`事件 ${eventId} 没有轨迹数据`)
+          continue
+        }
+
+        // 为每条轨迹创建线条，使用不同的颜色
+        for (const trajectory of trajectoryData.trajectories) {
+          // 为全局轨迹使用特殊的颜色和样式
+          const colorIndex = (i * 3 + trajectory.track_id) % trajectoryColors.length
+          const globalColor = trajectoryColors[colorIndex]
+          
+          const line = createGlobalTrajectoryLine(
+            trajectory.coordinates,
+            globalColor,
+            `${eventId}_${trajectory.track_id}`,
+            eventId
+          )
+          
+          if (line) {
+            scene.value.add(line)
+            allTrajectoryLines.push(line)
+          }
+        }
+
+      } catch (error) {
+        console.error(`加载事件 ${eventId} 轨迹失败:`, error)
+      }
+    }
+
+    globalTrajectoryLines.value = allTrajectoryLines
+    isGlobalTrajectoryMode.value = true
+
+    console.log(`成功显示全局轨迹: ${allTrajectoryLines.length} 条线条`)
+    return allTrajectoryLines.length > 0
+
+  } catch (error) {
+    console.error('显示全局轨迹失败:', error)
+    return false
+  }
+}
+
+// 创建全局轨迹线条（与普通轨迹稍有不同的样式）
+const createGlobalTrajectoryLine = (coordinates, color, trackId, eventId) => {
+  if (!coordinates || coordinates.length < 2) {
+    console.warn(`全局轨迹 ${trackId} 坐标点不足，无法创建线条`)
+    return null
+  }
+
+  try {
+    const positions = [];
+    coordinates.forEach(coord => {
+      positions.push(coord.x, coord.y + 0.1, coord.z); // 抬高更多
+    });
+
+    const geometry = new LineGeometry();
+    geometry.setPositions(positions);
+
+    const material = new LineMaterial({
+      color: new THREE.Color(color),
+      linewidth: 5, // 稍微粗一些
+      dashed: false,
+      transparent: true,
+      opacity: 0.7
+    });
+    material.resolution.set(container.value.clientWidth, container.value.clientHeight);
+
+    const line = new Line2(geometry, material);
+    line.computeLineDistances();
+    line.scale.set(1, 1, 1);
+    
+    line.userData = {
+      trackId: trackId,
+      eventId: eventId,
+      type: 'global_trajectory',
+      color: color,
+      pointCount: coordinates.length
+    }
+
+    // 添加轨迹点标记
+    coordinates.forEach((coord, index) => {
+      // 起点和终点使用不同大小的球体
+      const isStart = index === 0
+      const isEnd = index === coordinates.length - 1
+      const radius = isStart || isEnd ? 0.1 : 0.05 // 稍微大一些
+      
+      const pointGeometry = new THREE.SphereGeometry(radius, 8, 6)
+      
+      // 为每个点创建独立的材质
+      let pointColor = color
+      if (isStart) {
+        pointColor = '#00ff00' // 起点绿色
+      } else if (isEnd) {
+        pointColor = '#ff0000' // 终点红色
+      }
+      
+      const pointMaterial = new THREE.MeshBasicMaterial({
+        color: pointColor,
+        transparent: true,
+        opacity: isStart || isEnd ? 0.8 : 0.5
+      })
+      
+      const point = new THREE.Mesh(pointGeometry, pointMaterial)
+      
+      // 为起点和终点添加发光效果
+      if (isStart || isEnd) {
+        // 确保材质支持发光效果
+        if (point.material.emissive) {
+          point.material.emissive.setHex(isStart ? 0x004400 : 0x440000)
+          point.material.emissiveIntensity = 0.2
+        }
+      }
+      
+      point.position.set(coord.x, coord.y + 0.12, coord.z)
+      point.userData = {
+        trackId: trackId,
+        eventId: eventId,
+        type: 'global_trajectory_point',
+        index: index,
+        isStart: isStart,
+        isEnd: isEnd
+      }
+      
+      line.add(point)
+    })
+
+    console.log(`创建全局轨迹线条 - Event ID: ${eventId}, Track ID: ${trackId}, 颜色: ${color}, 点数: ${coordinates.length}`)
+    return line
+
+  } catch (error) {
+    console.error(`创建全局轨迹线条失败 - Track ID: ${trackId}:`, error)
+    return null
+  }
+}
+
+// 清除全局轨迹
+const clearGlobalTrajectories = () => {
+  globalTrajectoryLines.value.forEach(line => {
+    if (scene.value) {
+      scene.value.remove(line)
+    }
+    
+    // 清理几何体和材质
+    if (line.geometry) {
+      line.geometry.dispose()
+    }
+    if (line.material) {
+      line.material.dispose()
+    }
+    
+    // 清理子对象（轨迹点）
+    line.children.forEach(child => {
+      if (child.geometry) child.geometry.dispose()
+      if (child.material) child.material.dispose()
+    })
+  })
+  
+  globalTrajectoryLines.value = []
+  // isGlobalTrajectoryMode.value = false // 由调用者管理
+  console.log('已清除所有全局轨迹线条')
+}
+
+// 隐藏全局轨迹
+const hideGlobalTrajectory = () => {
+  clearGlobalTrajectories()
+  return true
 }
 
 // 切换轨迹显示
@@ -508,6 +728,7 @@ const cleanup = () => {
   
   // 清除轨迹线条
   clearTrajectories()
+  clearGlobalTrajectories()
   
   if (scene.value) {
     // 清除更新函数
@@ -547,10 +768,26 @@ const handleResize = () => {
   
   camera.value.aspect = container.value.clientWidth / container.value.clientHeight
   camera.value.updateProjectionMatrix()
+  
   renderer.value.setSize(container.value.clientWidth, container.value.clientHeight)
+  
+  // 更新所有LineMaterial的分辨率
+  const newWidth = container.value.clientWidth;
+  const newHeight = container.value.clientHeight;
+  
+  trajectoryLines.value.forEach(line => {
+    if (line.material.isLineMaterial) {
+      line.material.resolution.set(newWidth, newHeight)
+    }
+  });
+  globalTrajectoryLines.value.forEach(line => {
+    if (line.material.isLineMaterial) {
+      line.material.resolution.set(newWidth, newHeight)
+    }
+  });
 }
 
-// 处理点击事件
+// 点击事件处理
 const handleClick = (event) => {
   if (!container.value || !camera.value || !scene.value) return
 
@@ -602,15 +839,14 @@ const emit = defineEmits(['markerClick'])
 
 // 暴露方法
 defineExpose({
-  loadFloorPlan,
   addMarker,
   clearMarkers,
-  initScene,
-  isFloorplanLoaded,
-  showEventTrajectory,
-  clearTrajectories,
   toggleTrajectory,
-  currentTrajectoryEventId
+  showGlobalTrajectory,
+  hideGlobalTrajectory,
+  loadFloorPlan,
+  currentTrajectoryEventId,
+  isGlobalTrajectoryMode
 })
 </script>
 
