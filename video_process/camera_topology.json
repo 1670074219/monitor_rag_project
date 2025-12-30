@@ -1,7 +1,0 @@
-{
-  "camera1": ["camera2", "camera3"],
-  "camera2": ["camera1", "camera4"],
-  "camera3": ["camera1", "camera4"],
-  "camera4": ["camera2", "camera3", "camera5"],
-  "camera5": ["camera4"]
-}

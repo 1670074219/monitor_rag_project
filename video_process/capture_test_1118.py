@@ -248,18 +248,29 @@ class VideoCaptureServerFFmpeg:
         people_detected_frames = 0
         no_person_frames = 0
         is_recording = False
-        frame_counter = 0
         
-        width, height, fps = self.camera_states[camera_id]['resolution']
+        # 设定目标录制帧率，例如 5 FPS
+        # 这意味着无论原始流是多少，我们每秒只处理和录制 5 帧
+        # 这能保证视频播放速度正常，只要 YOLO 处理速度 > 5 FPS
+        TARGET_FPS = 10
+        frame_interval = 1.0 / TARGET_FPS
+        last_process_time = 0
+        
+        width, height, _ = self.camera_states[camera_id]['resolution']
 
         while self.running:
             try:
+                # 获取最新帧
+                # 注意：如果队列里积压了旧帧，我们需要快速跳过它们，只处理最新的
+                # 但由于 Grabber 已经在丢弃旧帧，这里直接取应该比较新
                 frame = frame_queue.get(timeout=1.0)
-                frame_counter += 1
                 
-                # 每隔几帧处理一次，降低CPU负载
-                if frame_counter % 2 != 0:
+                current_time = time.time()
+                # 基于时间控制处理频率
+                if current_time - last_process_time < frame_interval:
                     continue
+                
+                last_process_time = current_time
                 
                 # YOLO人员检测
                 results = self.yolo_model(frame, verbose=False, classes=[0])
@@ -277,9 +288,10 @@ class VideoCaptureServerFFmpeg:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = os.path.join(self.saved_video_path, f"{camera_id}_{timestamp}.mp4")
                     
-                    if self._start_ffmpeg_recording(camera_id, filename, width, height, fps):
+                    # 使用固定的 TARGET_FPS 启动录制
+                    if self._start_ffmpeg_recording(camera_id, filename, width, height, TARGET_FPS):
                         is_recording = True
-                        logger.info(f"[{camera_id}] 开始录制: {filename}")
+                        logger.info(f"[{camera_id}] 开始录制: {filename} (FPS: {TARGET_FPS})")
                 
                 # 停止录制
                 if no_person_frames >= self.no_person_frames_threshold and is_recording:
