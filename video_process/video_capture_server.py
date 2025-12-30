@@ -54,15 +54,15 @@ class VideoCaptureServer:
         while True:
             try:
                 # 简化的ffmpeg命令参数
-            command = [
-                'ffmpeg',
+                command = [
+                    'ffmpeg',
                     '-rtsp_transport', 'tcp',           # 使用TCP传输，更稳定
-                '-i', camera_url,
-                '-f', 'rawvideo',
-                '-pix_fmt', 'bgr24',
-                '-vcodec', 'rawvideo',
-                '-'
-            ]
+                    '-i', camera_url,
+                    '-f', 'rawvideo',
+                    '-pix_fmt', 'bgr24',
+                    '-vcodec', 'rawvideo',
+                    '-'
+                ]
 
                 logger.info(f"{camera_id} 正在连接RTSP流...")
                 pipe = subprocess.Popen(
@@ -78,13 +78,13 @@ class VideoCaptureServer:
                 frame_count = 0
                 last_success_time = time.time()
                 
-            while True:
+                while True:
                     try:
                         # 设置读取超时
                         start_time = time.time()
                         raw_image = pipe.stdout.read(width * height * 3)
                         
-                if not raw_image:
+                        if not raw_image:
                             # 检查进程状态
                             if pipe.poll() is not None:
                                 # 进程已结束，读取错误信息
@@ -92,14 +92,14 @@ class VideoCaptureServer:
                                 logger.error(f"{camera_id} ffmpeg进程异常结束: {stderr_output[-200:]}")  # 只显示最后200字符
                             else:
                                 logger.error(f"{camera_id} 读取到空帧")
-                    break
+                            break
                         
                         # 检查数据完整性
                         if len(raw_image) != width * height * 3:
                             logger.warning(f"{camera_id} 帧数据不完整: 期望{width * height * 3}字节，实际{len(raw_image)}字节")
                             continue
                         
-                try:
+                        try:
                             frame = np.frombuffer(raw_image, dtype=np.uint8).reshape((height, width, 3))
                             frame_count += 1
                             last_success_time = time.time()
@@ -108,7 +108,7 @@ class VideoCaptureServer:
                             if frame_count % 1000 == 0:
                                 logger.info(f"{camera_id} 已成功处理 {frame_count} 帧")
                             
-                yield frame
+                            yield frame
                             
                         except ValueError as e:
                             logger.error(f"{camera_id} 帧重塑失败: {e}")
@@ -341,8 +341,8 @@ if __name__ == "__main__":
                                              video_queue=video_queue,
                                              video_description_path=os.path.join(base_dir, "video_description.json"))
     
-    # video_capture_server.get_video_resolution(video_capture_server.camera_config[1]['camera_url'])
-    # video_capture_server.record_video(video_capture_server.camera_config[0]['camera_id'], video_capture_server.camera_config[0]['camera_url'])
+    video_capture_server.get_video_resolution(video_capture_server.camera_config[1]['camera_url'])
+    video_capture_server.record_video(video_capture_server.camera_config[0]['camera_id'], video_capture_server.camera_config[0]['camera_url'])
     video_capture_server.run_all_cameras()
     
     

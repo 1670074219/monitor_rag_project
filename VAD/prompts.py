@@ -1,12 +1,23 @@
-# 根据不同的场景使用不同的正常规则启动
-rules = """
-### **正常规则**
-1. **xxx**
-2. **xxx**
-3. **xxx**
-...
+# 从文件加载正常规则
+import os
 
+def load_rules():
+    """从 SHTech_Rules.txt 加载正常规则"""
+    rules_file_path = os.path.join(os.path.dirname(__file__), 'SHTech_Rules.txt')
+    try:
+        with open(rules_file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        # 如果文件不存在，使用默认规则
+        return """
+### **正常规则**
+1. **学生在教学楼走廊内正常行走、站立或交谈**
+2. **学生在教室内上课、学习、讨论或进出教室**
+3. **学生携带书包、书本、文具等学习用品在校园内移动**
 """
+
+# 加载规则
+rules = load_rules()
 
 
 llm_prompt1 = f"""

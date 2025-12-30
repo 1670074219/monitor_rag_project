@@ -79,9 +79,10 @@ class RTSPStreamCapture:
         """获取视频流信息"""
         logger.info(f"[{self.camera_name}] 正在获取摄像头视频信息...")
         try:
+            # 只传递 probe 支持的参数（不使用 timeout，避免被误解为 listen 模式）
             probe_params = {
-                **self.ffmpeg_params,
-                "analyzeduration": "10M"
+                "rtsp_transport": "tcp",
+                "stimeout": "5000000"  # 使用 stimeout (socket timeout) 代替 timeout，单位：微秒
             }
             print(self.rtsp_url)
             probe = ffmpeg.probe(self.rtsp_url, **probe_params) # 增加超时
@@ -105,8 +106,12 @@ class RTSPStreamCapture:
                 "width": int(video_info['width']),
                 "height": int(video_info['height'])
             }
+        except ffmpeg.Error as e:
+            logger.error(f"[{self.camera_name}] FFprobe 错误: {e.stderr.decode() if e.stderr else str(e)}")
+            raise RuntimeError(f"无法解析视频流信息: {e.stderr.decode() if e.stderr else str(e)}") # 抛出异常以便上层捕获
         except Exception as e:
             logger.error(f"[{self.camera_name}] 无法解析视频流信息: {str(e)}")
+            logger.error(f"[{self.camera_name}] 详细错误: {traceback.format_exc()}")
             raise RuntimeError(f"无法解析视频流信息: {str(e)}") # 抛出异常以便上层捕获
 
     def _capture_loop(self):

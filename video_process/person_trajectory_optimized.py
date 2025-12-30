@@ -10,7 +10,7 @@ from ultralytics import YOLO
 from deepsort.deepsort import DeepSort
 from deepsort.deep.feature_extractor import Extractor
 
-def load_camera_config(config_path='video_process/camera_config.json'):
+def load_camera_config(config_path='./camera_config.json'):
     """
     加载摄像头配置文件
     """
@@ -22,7 +22,7 @@ def load_camera_config(config_path='video_process/camera_config.json'):
         print(f"加载摄像头配置失败: {e}")
         return None
 
-def load_video_descriptions(desc_path='video_process/video_description.json'):
+def load_video_descriptions(desc_path='./video_description.json'):
     """
     加载视频描述文件
     """
@@ -34,7 +34,7 @@ def load_video_descriptions(desc_path='video_process/video_description.json'):
         print(f"加载视频描述失败: {e}")
         return None
 
-def save_trajectory_results(results, output_path='video_process/video_description_with_trajectory.json'):
+def save_trajectory_results(results, output_path='./video_description_with_trajectory.json'):
     """
     保存轨迹结果到JSON文件
     """
@@ -45,7 +45,7 @@ def save_trajectory_results(results, output_path='video_process/video_descriptio
     except Exception as e:
         print(f"保存轨迹结果失败: {e}")
 
-def update_single_video_trajectory(video_name, trajectory_data, desc_path='video_process/video_description.json'):
+def update_single_video_trajectory(video_name, trajectory_data, desc_path='./video_description.json'):
     """
     更新单个视频的轨迹数据到原始JSON文件
     """
@@ -279,7 +279,7 @@ def main():
     print(f"使用的设备: {device}")
 
     try:
-        yolo_model_path = os.path.abspath('video_process/yolo/yolo11s.pt')
+        yolo_model_path = os.path.abspath('./yolo/yolo11s.pt')
         yolo_model = YOLO(yolo_model_path)
         yolo_model.to(device)
         print(f"YOLOv11 模型加载成功")
@@ -288,7 +288,7 @@ def main():
         return
 
     # 初始化 DeepSORT 特征提取器
-    deepsort_model_path = 'video_process/deepsort/deep/checkpoint/ckpt.t7'
+    deepsort_model_path = './deepsort/deep/checkpoint/ckpt.t7'
     try:
         feature_extractor = Extractor(deepsort_model_path, use_cuda=torch.cuda.is_available())
         print("DeepSORT 特征提取器加载成功")
@@ -348,7 +348,7 @@ def main():
     
     print("\n" + "=" * 60)
     print(f"🎉 全部处理完成！共处理了 {processed_count} 个视频")
-    print(f"📁 结果已直接保存到: video_process/video_description.json")
+    print(f"📁 结果已直接保存到: ./video_description.json")
 
 if __name__ == '__main__':
     main() 

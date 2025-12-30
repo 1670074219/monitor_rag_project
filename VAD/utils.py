@@ -4,7 +4,7 @@ import cv2
 import base64
 import glob
 import numpy as np
-from config import *
+from VAD.config import client, llm_model_name, vlm_model_name, emb_model_name, temperature, emb_d
 
 def save_json(file_name,content):
     with open(file_name, "w", encoding="utf-8") as f:
@@ -107,11 +107,24 @@ def vlm_inference(selected_images, system_prompt):
     return completion.choices[0].message.content
 
 def rag_embedding(logs):
-    completion = client.embeddings.create(
-        model=emb_model_name,
-        input=logs,
-        dimensions=emb_d,
-        encoding_format="float"
-    )
-    resp = completion.model_dump_json()
-    return [data["embedding"] for data in parse_json_response(resp)["data"]]
+    """
+    生成文本的 embedding
+    注意：本地 vLLM 可能不支持 embedding API
+    """
+    if emb_model_name is None:
+        # 如果没有配置 embedding 模型，返回 None 或使用简单的替代方案
+        print("⚠️ 警告: embedding 模型未配置，无法生成 embedding")
+        return None
+    
+    try:
+        completion = client.embeddings.create(
+            model=emb_model_name,
+            input=logs,
+            dimensions=emb_d,
+            encoding_format="float"
+        )
+        resp = completion.model_dump_json()
+        return [data["embedding"] for data in parse_json_response(resp)["data"]]
+    except Exception as e:
+        print(f"⚠️ Embedding 生成失败: {e}")
+        return None
