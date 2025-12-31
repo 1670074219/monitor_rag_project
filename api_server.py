@@ -10,8 +10,11 @@ import re
 from datetime import datetime
 import math
 import random
+import mysql.connector
+from mysql.connector import Error
 
-from video_process.faiss_server import FaissServer
+from video_process.dataset_process.faiss_server import FaissServer
+from video_process.person_search.person_search_engine import PersonSearchEngine
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,8 +23,30 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # 允许跨域请求
 
+# 数据库配置
+DB_CONFIG = {
+    'host': '219.216.99.30',
+    'port': 3306,
+    'database': 'monitor_database',
+    'user': 'root',
+    'password': 'q1w2e3az',
+    'charset': 'utf8mb4',
+    'autocommit': False,
+    'pool_name': 'api_server_pool',
+    'pool_size': 5
+}
+
+def get_db_connection():
+    """获取数据库连接"""
+    try:
+        return mysql.connector.connect(**DB_CONFIG)
+    except Error as e:
+        logger.error(f"数据库连接失败: {e}")
+        return None
+
 # 全局变量
 faiss_server = None
+person_search_engine = None
 video_description_path = None
 saved_video_path = None
 
@@ -77,7 +102,7 @@ CAMERA_REGIONS = {
 
 def init_servers():
     """初始化服务器"""
-    global faiss_server, video_description_path, saved_video_path
+    global faiss_server, person_search_engine, video_description_path, saved_video_path
     
     base_dir = os.path.join(os.path.dirname(__file__), "video_process")
     video_description_path = os.path.join(base_dir, "video_description.json")
@@ -91,6 +116,13 @@ def init_servers():
         index_path=os.path.join(base_dir, "faiss_ifl2.index"),
         video_description_path=video_description_path
     )
+
+    # 初始化行人搜索引擎
+    try:
+        person_search_engine = PersonSearchEngine()
+        logger.info("PersonSearchEngine 初始化成功")
+    except Exception as e:
+        logger.error(f"PersonSearchEngine 初始化失败: {e}")
     
     logger.info("所有服务器初始化完成")
 
@@ -176,6 +208,125 @@ def query():
             'status': 'error',
             'error_message': f'服务器内部错误: {str(e)}'
         }), 500
+
+@app.route('/api/video_persons/<video_id>', methods=['GET'])
+def get_video_persons(video_id):
+    """获取视频中出现的所有人物索引"""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': '数据库连接失败'}), 500
+            
+        cursor = conn.cursor(dictionary=True)
+        
+        # 首先检查 video_id 是否存在 (可能是 id 或 video_name)
+        # 这里假设传入的是 video_id (int)
+        # 如果传入的是 video_name (str)，需要先查 id
+        
+        real_video_id = video_id
+        if not str(video_id).isdigit():
+             # 尝试通过名称查找 ID
+            cursor.execute("SELECT id FROM videos WHERE video_name = %s", (video_id,))
+            res = cursor.fetchone()
+            if res:
+                real_video_id = res['id']
+            else:
+                return jsonify({'error': '视频不存在'}), 404
+
+        sql = "SELECT DISTINCT person_index FROM video_vectors WHERE video_id = %s ORDER BY person_index"
+        cursor.execute(sql, (real_video_id,))
+        results = cursor.fetchall()
+        
+        persons = [row['person_index'] for row in results]
+        
+        return jsonify({
+            'video_id': real_video_id,
+            'persons': persons
+        })
+        
+    except Exception as e:
+        logger.error(f"获取视频人物列表失败: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
+@app.route('/api/global_trajectory', methods=['POST'])
+def global_trajectory():
+    """全局轨迹搜索"""
+    try:
+        data = request.get_json()
+        video_id = data.get('video_id')
+        person_index = data.get('person_index')
+        time_window = data.get('time_window', 10)
+        
+        if not video_id or person_index is None:
+            return jsonify({'error': '缺少必要参数 video_id 或 person_index'}), 400
+            
+        # 确保 video_id 是 int
+        real_video_id = video_id
+        if not str(video_id).isdigit():
+             # 如果前端传的是 video_name，需要转换
+             conn = get_db_connection()
+             if conn:
+                 cursor = conn.cursor(dictionary=True)
+                 cursor.execute("SELECT id FROM videos WHERE video_name = %s", (video_id,))
+                 res = cursor.fetchone()
+                 cursor.close()
+                 conn.close()
+                 if res:
+                     real_video_id = res['id']
+                 else:
+                     return jsonify({'error': '视频不存在'}), 404
+        
+        if not person_search_engine:
+            return jsonify({'error': '搜索引擎未初始化'}), 500
+            
+        results = person_search_engine.search_target(real_video_id, person_index, time_window)
+        
+        # 转换结果格式以适配前端显示
+        # 前端需要 scene_coords (x, y, z)
+        formatted_results = []
+        
+        for res in results:
+            traj_data = res['trajectory']
+            coordinates = traj_data.get('points', [])
+            scene_coords = []
+            
+            for coord in coordinates:
+                if len(coord) >= 2:
+                    real_x, real_y = coord[0], coord[1]
+                    scene_x, scene_z = convert_pixel_to_scene_coords(real_x, real_y)
+                    scene_coords.append({
+                        'x': round(scene_x, 3),
+                        'y': 0,
+                        'z': round(scene_z, 3)
+                    })
+            
+            if scene_coords:
+                formatted_results.append({
+                    'video_id': res['video_id'],
+                    'video_name': res['video_name'],
+                    'camera_id': res['camera_id'],
+                    'person_index': res['person_index'],
+                    'similarity': res['similarity'],
+                    'time': res['time'],
+                    'coordinates': scene_coords
+                })
+                
+        return jsonify({
+            'status': 'success',
+            'count': len(formatted_results),
+            'trajectories': formatted_results
+        })
+        
+    except Exception as e:
+        logger.error(f"全局轨迹搜索失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/video/<video_name>')
 def get_video(video_name):
@@ -811,33 +962,97 @@ def get_events_3d():
 
 @app.route('/api/trajectory/<event_id>')
 def get_event_trajectory(event_id):
-    """获取指定事件的轨迹数据"""
+    """获取指定事件的轨迹数据（从数据库读取）"""
+    conn = None
+    cursor = None
     try:
-        # 直接使用video_description.json文件
-        with open(video_description_path, 'r', encoding='utf-8') as f:
-            video_data = json.load(f)
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': '数据库连接失败'}), 500
+            
+        cursor = conn.cursor(dictionary=True)
         
-        if event_id not in video_data:
+        # 1. 查询视频信息
+        # 尝试匹配 event_id 或 event_id.mp4
+        query_video = "SELECT id, person_count FROM videos WHERE video_name = %s OR video_name = %s"
+        cursor.execute(query_video, (event_id, f"{event_id}.mp4"))
+        video = cursor.fetchone()
+        
+        if not video:
+            # 如果数据库没找到，尝试回退到 JSON 文件（为了兼容性）
+            logger.warning(f"数据库中未找到视频 {event_id}，尝试读取 JSON 文件")
+            try:
+                with open(video_description_path, 'r', encoding='utf-8') as f:
+                    video_data = json.load(f)
+                if event_id in video_data:
+                    video_info = video_data[event_id]
+                    trajectory_data = video_info.get('trajectory_data')
+                    if trajectory_data and 'trajectories' in trajectory_data:
+                        return jsonify({
+                            'event_id': event_id,
+                            'person_count': trajectory_data.get('person_count', 0),
+                            'coordinate_system': trajectory_data.get('coordinate_system', 'real_world'),
+                            'unit': trajectory_data.get('unit', 'centimeters'),
+                            'trajectories': trajectory_data.get('trajectories', [])
+                        })
+            except Exception as e:
+                logger.error(f"回退读取 JSON 失败: {e}")
+            
             return jsonify({'error': '事件不存在'}), 404
+            
+        video_id = video['id']
+        person_count = video['person_count']
         
-        video_info = video_data[event_id]
-        trajectory_data = video_info.get('trajectory_data')
+        # 2. 查询轨迹数据
+        query_vectors = "SELECT person_index, person_trajectory FROM video_vectors WHERE video_id = %s"
+        cursor.execute(query_vectors, (video_id,))
+        vectors = cursor.fetchall()
         
-        if not trajectory_data or 'trajectories' not in trajectory_data:
+        if not vectors:
             return jsonify({'error': '该事件没有轨迹数据'}), 404
-        
-        # 返回原始轨迹数据
+            
+        trajectories = []
+        for vec in vectors:
+            try:
+                traj_json = vec['person_trajectory']
+                if not traj_json:
+                    continue
+                    
+                # 如果是字符串则解析，如果是字典则直接使用
+                if isinstance(traj_json, str):
+                    traj_data = json.loads(traj_json)
+                else:
+                    traj_data = traj_json
+                    
+                # 适配数据格式
+                # 数据库格式: {"unit": "cm", "length": 14, "points": [[x, y], ...]}
+                # API返回格式: {"track_id": 1, "coordinates": [[x, y], ...]}
+                
+                trajectories.append({
+                    'track_id': vec['person_index'],
+                    'coordinates': traj_data.get('points', []),
+                    'length': traj_data.get('length', 0)
+                })
+            except Exception as e:
+                logger.error(f"解析轨迹数据失败: {e}")
+                continue
+                
         return jsonify({
             'event_id': event_id,
-            'person_count': trajectory_data.get('person_count', 0),
-            'coordinate_system': trajectory_data.get('coordinate_system', 'real_world'),
-            'unit': trajectory_data.get('unit', 'centimeters'),
-            'trajectories': trajectory_data.get('trajectories', [])
+            'person_count': person_count,
+            'coordinate_system': 'real_world',
+            'unit': 'centimeters', # 假设数据库单位是 cm
+            'trajectories': trajectories
         })
         
     except Exception as e:
         logger.error(f"获取轨迹数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def convert_pixel_to_scene_coords(pixel_x, pixel_y):
     """将像素坐标转换为3D场景坐标"""
@@ -866,23 +1081,22 @@ def convert_pixel_to_scene_coords(pixel_x, pixel_y):
 
 @app.route('/api/trajectory/<event_id>/scene_coords')
 def get_event_trajectory_scene_coords(event_id):
-    """获取转换为3D场景坐标的轨迹数据"""
+    """获取转换为3D场景坐标的轨迹数据（从数据库读取）"""
+    conn = None
+    cursor = None
     try:
-        # 直接使用video_description.json文件
-        with open(video_description_path, 'r', encoding='utf-8') as f:
-            video_data = json.load(f)
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': '数据库连接失败'}), 500
+            
+        cursor = conn.cursor(dictionary=True)
         
-        if event_id not in video_data:
-            return jsonify({'error': '事件不存在'}), 404
+        # 1. 查询视频信息
+        query_video = "SELECT id, person_count FROM videos WHERE video_name = %s OR video_name = %s"
+        cursor.execute(query_video, (event_id, f"{event_id}.mp4"))
+        video = cursor.fetchone()
         
-        video_info = video_data[event_id]
-        trajectory_data = video_info.get('trajectory_data')
-        
-        if not trajectory_data or 'trajectories' not in trajectory_data:
-            return jsonify({'error': '该事件没有轨迹数据'}), 404
-        
-        # 转换为3D场景坐标格式
-        scene_trajectories = []
+        # 轨迹颜色列表
         trajectory_colors = [
             '#ff4444',  # 红色
             '#44ff44',  # 绿色  
@@ -896,40 +1110,108 @@ def get_event_trajectory_scene_coords(event_id):
             '#ff4488'   # 洋红
         ]
         
-        for i, traj in enumerate(trajectory_data.get('trajectories', [])):
-            track_id = traj.get('track_id', i)
-            coordinates = traj.get('coordinates', [])
+        if not video:
+            # 回退到 JSON 文件
+            logger.warning(f"数据库中未找到视频 {event_id}，尝试读取 JSON 文件")
+            try:
+                with open(video_description_path, 'r', encoding='utf-8') as f:
+                    video_data = json.load(f)
+                if event_id in video_data:
+                    video_info = video_data[event_id]
+                    trajectory_data = video_info.get('trajectory_data')
+                    if trajectory_data and 'trajectories' in trajectory_data:
+                        scene_trajectories = []
+                        for i, traj in enumerate(trajectory_data.get('trajectories', [])):
+                            track_id = traj.get('track_id', i)
+                            coordinates = traj.get('coordinates', [])
+                            scene_coords = []
+                            for coord in coordinates:
+                                if len(coord) >= 2:
+                                    real_x, real_y = coord[0], coord[1]
+                                    scene_x, scene_z = convert_pixel_to_scene_coords(real_x, real_y)
+                                    scene_coords.append({'x': round(scene_x, 3), 'y': 0, 'z': round(scene_z, 3)})
+                            if scene_coords:
+                                scene_trajectories.append({
+                                    'track_id': track_id,
+                                    'trajectory_length': len(scene_coords),
+                                    'coordinates': scene_coords,
+                                    'color': trajectory_colors[track_id % len(trajectory_colors)]
+                                })
+                        return jsonify({
+                            'event_id': event_id,
+                            'person_count': trajectory_data.get('person_count', 0),
+                            'trajectories': scene_trajectories
+                        })
+            except Exception as e:
+                logger.error(f"回退读取 JSON 失败: {e}")
             
-            # 转换坐标格式：[real_x, real_y] -> {x: scene_x, y: 0, z: scene_z}
-            scene_coords = []
-            for coord in coordinates:
-                if len(coord) >= 2:
-                    real_x, real_y = coord[0], coord[1]
-                    scene_x, scene_z = convert_pixel_to_scene_coords(real_x, real_y)
+            return jsonify({'error': '事件不存在'}), 404
+            
+        video_id = video['id']
+        person_count = video['person_count']
+        
+        # 2. 查询轨迹数据
+        query_vectors = "SELECT person_index, person_trajectory FROM video_vectors WHERE video_id = %s"
+        cursor.execute(query_vectors, (video_id,))
+        vectors = cursor.fetchall()
+        
+        if not vectors:
+            return jsonify({'error': '该事件没有轨迹数据'}), 404
+            
+        scene_trajectories = []
+        for vec in vectors:
+            try:
+                traj_json = vec['person_trajectory']
+                if not traj_json:
+                    continue
                     
-                    scene_coords.append({
-                        'x': round(scene_x, 3),
-                        'y': 0,  # 地面高度
-                        'z': round(scene_z, 3)
+                if isinstance(traj_json, str):
+                    traj_data = json.loads(traj_json)
+                else:
+                    traj_data = traj_json
+                
+                track_id = vec['person_index']
+                # 数据库中的 points 对应 coordinates
+                coordinates = traj_data.get('points', [])
+                
+                scene_coords = []
+                for coord in coordinates:
+                    if len(coord) >= 2:
+                        real_x, real_y = coord[0], coord[1]
+                        scene_x, scene_z = convert_pixel_to_scene_coords(real_x, real_y)
+                        
+                        scene_coords.append({
+                            'x': round(scene_x, 3),
+                            'y': 0,  # 地面高度
+                            'z': round(scene_z, 3)
+                        })
+                
+                if scene_coords:
+                    scene_trajectories.append({
+                        'track_id': track_id,
+                        'trajectory_length': len(scene_coords),
+                        'coordinates': scene_coords,
+                        'color': trajectory_colors[track_id % len(trajectory_colors)]
                     })
-            
-            if scene_coords:  # 只添加有坐标的轨迹
-                scene_trajectories.append({
-                    'track_id': track_id,
-                    'trajectory_length': len(scene_coords),
-                    'coordinates': scene_coords,
-                    'color': trajectory_colors[track_id % len(trajectory_colors)]
-                })
+                    
+            except Exception as e:
+                logger.error(f"解析轨迹数据失败: {e}")
+                continue
         
         return jsonify({
             'event_id': event_id,
-            'person_count': trajectory_data.get('person_count', 0),
+            'person_count': person_count,
             'trajectories': scene_trajectories
         })
         
     except Exception as e:
         logger.error(f"获取场景坐标轨迹数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 @app.route('/api/related_events/<event_id>')
 def get_related_events(event_id):

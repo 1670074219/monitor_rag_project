@@ -470,6 +470,54 @@ const showGlobalTrajectory = async (eventIds) => {
   }
 }
 
+// 显示全局搜索结果 (新版)
+const showGlobalSearchResults = (results) => {
+  try {
+    // 清除所有现有轨迹
+    clearTrajectories()
+    clearGlobalTrajectories()
+    
+    const allTrajectoryLines = []
+    const trajectoryColors = [
+      '#ff4444', '#44ff44', '#4444ff', '#ffff44', '#ff44ff', 
+      '#44ffff', '#ff8844', '#8844ff', '#44ff88', '#ff4488'
+    ]
+    
+    if (!results || results.length === 0) {
+      console.warn('没有全局搜索结果')
+      return false
+    }
+
+    // 为每条结果创建线条
+    results.forEach((result, index) => {
+      const colorIndex = index % trajectoryColors.length
+      const globalColor = trajectoryColors[colorIndex]
+      
+      const line = createGlobalTrajectoryLine(
+        result.coordinates,
+        globalColor,
+        `${result.video_id}_${result.person_index}`,
+        result.video_id
+      )
+      
+      if (line) {
+        scene.value.add(line)
+        allTrajectoryLines.push(line)
+      }
+    })
+
+    globalTrajectoryLines.value = allTrajectoryLines
+    isGlobalTrajectoryMode.value = true
+
+    console.log(`成功显示全局搜索结果: ${allTrajectoryLines.length} 条线条`)
+    return true
+
+  } catch (error) {
+    console.error('显示全局搜索结果失败:', error)
+    return false
+  }
+}
+
 // 创建全局轨迹线条（与普通轨迹稍有不同的样式）
 const createGlobalTrajectoryLine = (coordinates, color, trackId, eventId) => {
   if (!coordinates || coordinates.length < 2) {
@@ -843,6 +891,7 @@ defineExpose({
   clearMarkers,
   toggleTrajectory,
   showGlobalTrajectory,
+  showGlobalSearchResults,
   hideGlobalTrajectory,
   loadFloorPlan,
   currentTrajectoryEventId,

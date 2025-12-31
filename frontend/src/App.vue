@@ -52,37 +52,6 @@
                 {{ isGlobalTrajectoryLoading ? '🔍 搜索中...' : (isGlobalTrajectoryMode ? '🌐 隐藏全局轨迹' : '🌐 全局轨迹') }}
               </button>
               
-              <!-- 搜索参数调整 -->
-              <div v-if="selectedEvent.has_trajectory" class="search-params">
-                <details class="search-config">
-                  <summary>🔧 搜索参数调整</summary>
-                  <div class="param-controls">
-                    <div class="param-item">
-                      <label>相似度阈值: {{ searchParams.threshold }}</label>
-                      <input type="range" v-model.number="searchParams.threshold" min="0.1" max="0.8" step="0.1" />
-                      <span class="param-desc">越低越容易找到相关事件</span>
-                    </div>
-                    
-                    <div class="param-item">
-                      <label>关键词权重: {{ searchParams.keywordWeight.toFixed(1) }}</label>
-                      <input type="range" v-model.number="searchParams.keywordWeight" min="0.1" max="0.9" step="0.1" @input="adjustWeights('keyword')" />
-                    </div>
-                    
-                    <div class="param-item">
-                      <label>语义权重: {{ searchParams.semanticWeight.toFixed(1) }}</label>
-                      <input type="range" v-model.number="searchParams.semanticWeight" min="0.1" max="0.9" step="0.1" @input="adjustWeights('semantic')" />
-                      <span class="param-desc">权重之和 = {{ (searchParams.keywordWeight + searchParams.semanticWeight).toFixed(1) }}</span>
-                    </div>
-                    
-                    <div class="param-presets">
-                      <button @click="setPreset('easy')" class="preset-btn">宽松搜索</button>
-                      <button @click="setPreset('normal')" class="preset-btn">正常搜索</button>
-                      <button @click="setPreset('strict')" class="preset-btn">严格搜索</button>
-                    </div>
-                  </div>
-                </details>
-              </div>
-              
               <span v-else-if="!selectedEvent.has_trajectory" class="no-trajectory-hint">
                 此事件无轨迹数据
               </span>
@@ -97,11 +66,6 @@
         </div>
         <div v-else class="no-selection">
            点击地图标记或选择日期查看详情
-        </div>
-        
-        <!-- Add the new Pie Chart Section -->
-        <div class="left-panel-section left-panel-bottom-chart">
-           <DailyEventTypeChart :events-for-date="eventsForSelectedDate" />
         </div>
       </div>
       <div class="center-area-wrapper">
@@ -127,13 +91,6 @@
               :camera-activity-data="cameraActivityForSelectedDate"
             />
          </div>
-         
-         <!-- Bottom Section: Abnormal Events -->
-         <div class="right-panel-section right-panel-bottom">
-            <AbnormalEventsStats 
-              :weekly-abnormal-data="weeklyAbnormalData" 
-            />
-         </div>
       </div>
     </div>
 
@@ -145,6 +102,24 @@
        /> 
     </div>
     <!-- End Chat Dropdown Panel -->
+
+    <!-- Person Selection Modal -->
+    <div v-if="showPersonModal" class="person-modal">
+      <div class="person-modal-content">
+        <h3>选择要追踪的人物</h3>
+        <div class="person-list">
+          <button 
+            v-for="personIndex in availablePersons" 
+            :key="personIndex"
+            @click="confirmPersonSelection(personIndex)"
+            class="person-select-btn"
+          >
+            人物 #{{ personIndex }}
+          </button>
+        </div>
+        <button class="close-modal-btn" @click="showPersonModal = false">取消</button>
+      </div>
+    </div>
 
     <div v-if="videoUrl" class="video-modal">
       <div class="video-container">
@@ -220,6 +195,11 @@ const isGlobalTrajectoryLoading = ref(false)
 const globalTrajectoryEventIds = ref([])
 const globalTrajectoryTargetEventId = ref(null) // 目标事件ID
 
+// 人物选择相关状态
+const showPersonModal = ref(false)
+const availablePersons = ref([])
+const targetVideoId = ref(null)
+
 // 搜索参数配置
 const searchParams = ref({
   threshold: 0.3,      // 相似度阈值（默认宽松）
@@ -277,16 +257,31 @@ const visibleEvents = computed(() => {
       globalTrajectoryTargetEventId.value // 目标事件ID
     ].filter(Boolean)); // 过滤掉null/undefined
     
-    const globalFilteredEvents = timeFilteredEvents.filter(event => 
+    // 在全局轨迹模式下，忽略时间窗口限制，显示所有相关事件
+    // 使用 selectedDateEvents 而不是 timeFilteredEvents
+    const globalFilteredEvents = selectedDateEvents.filter(event => 
       relatedEventIds.has(event.id)
     );
     
     console.log(`全局轨迹模式过滤后显示 ${globalFilteredEvents.length} 个相关事件`);
-    console.log('显示的相关事件IDs:', globalFilteredEvents.map(e => e.id));
     return globalFilteredEvents;
   }
   
   return timeFilteredEvents;
+});
+
+// 监听时间轴变化，如果处于全局轨迹模式，则退出该模式
+watch(timeOfDaySeconds, (newVal, oldVal) => {
+  // 只有当值真正改变且处于全局模式时才重置
+  if (isGlobalTrajectoryMode.value && Math.abs(newVal - oldVal) > 1) {
+    console.log('时间轴变动，退出全局轨迹模式');
+    if (threeDMap.value) {
+      threeDMap.value.hideGlobalTrajectory();
+    }
+    isGlobalTrajectoryMode.value = false;
+    globalTrajectoryEventIds.value = [];
+    globalTrajectoryTargetEventId.value = null;
+  }
 });
 
 const abnormalVisibleEvents = computed(() => {
@@ -440,49 +435,102 @@ const showGlobalTrajectory = async (eventId) => {
     isGlobalTrajectoryLoading.value = true;
     console.log(`搜索与事件 ${eventId} 相关的全局轨迹`);
 
-    // 调用API搜索相关事件 - 使用动态搜索参数
-    const params = new URLSearchParams({
-      date: selectedDate.value,
-      threshold: searchParams.value.threshold,
-      keyword_weight: searchParams.value.keywordWeight,
-      semantic_weight: searchParams.value.semanticWeight,
-      max_results: 15
-    });
-    const response = await fetch(`/api/related_events/${eventId}?${params}`);
+    // 1. 获取视频中的人物列表
+    const response = await fetch(`/api/video_persons/${eventId}`);
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new Error(`获取人物列表失败: ${response.status}`);
     }
-
-    const relatedEvents = await response.json();
-    console.log(`找到 ${relatedEvents.length} 个相关事件:`, relatedEvents);
-
-    if (relatedEvents.length === 0) {
-      alert('未找到相关事件');
+    
+    const data = await response.json();
+    const persons = data.persons;
+    
+    if (!persons || persons.length === 0) {
+      alert('该视频中未检测到人物轨迹');
+      isGlobalTrajectoryLoading.value = false;
       return;
     }
-
-    // 显示所有相关事件的轨迹
-    const eventIds = relatedEvents.map(event => event.event_id);
-    globalTrajectoryEventIds.value = eventIds;
-    globalTrajectoryTargetEventId.value = eventId; // 保存目标事件ID
     
-    const success = await threeDMap.value.showGlobalTrajectory(eventIds);
-    
-    if (success) {
-      isGlobalTrajectoryMode.value = true;
-      console.log(`全局轨迹显示成功: ${eventIds.length} 个相关事件 + 1个目标事件`);
-      console.log(`目标事件: ${eventId}, 相关事件: ${eventIds.join(', ')}`);
+    if (persons.length === 1) {
+      // 只有一个人，直接搜索
+      await executeGlobalSearch(eventId, persons[0]);
     } else {
-      console.error('全局轨迹显示失败');
+      // 多个人，显示选择弹窗
+      availablePersons.value = persons;
+      targetVideoId.value = eventId;
+      showPersonModal.value = true;
+      isGlobalTrajectoryLoading.value = false; // 等待用户选择
     }
 
   } catch (error) {
     console.error('显示全局轨迹失败:', error);
     alert(`显示全局轨迹失败: ${error.message}`);
-    // 出错时清理状态
-    isGlobalTrajectoryMode.value = false;
-    globalTrajectoryEventIds.value = [];
-    globalTrajectoryTargetEventId.value = null;
+    isGlobalTrajectoryLoading.value = false;
+  }
+};
+
+// 确认人物选择
+const confirmPersonSelection = async (personIndex) => {
+  showPersonModal.value = false;
+  isGlobalTrajectoryLoading.value = true;
+  
+  if (targetVideoId.value) {
+    await executeGlobalSearch(targetVideoId.value, personIndex);
+  }
+};
+
+// 执行全局搜索
+const executeGlobalSearch = async (videoId, personIndex) => {
+  try {
+    console.log(`开始全局搜索: Video ${videoId}, Person ${personIndex}`);
+    
+    const response = await fetch('/api/global_trajectory', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        video_id: videoId,
+        person_index: personIndex,
+        time_window: 15 // 默认15分钟
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`搜索请求失败: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    if (data.status === 'success') {
+      const success = threeDMap.value.showGlobalSearchResults(data.trajectories);
+      
+      if (success) {
+        isGlobalTrajectoryMode.value = true;
+        globalTrajectoryTargetEventId.value = videoId;
+        
+        // 提取所有相关视频ID，用于过滤显示
+        // 注意：后端返回的 video_id 是数据库ID (int)，而前端 events 中的 id 是 video_name (string)
+        // 后端返回的 video_name 字段对应前端的 id
+        const foundEventIds = data.trajectories.map(t => t.video_name);
+        
+        // 确保包含目标视频ID (目标视频ID本身就是 video_name)
+        if (!foundEventIds.includes(videoId)) {
+            foundEventIds.push(videoId);
+        }
+        globalTrajectoryEventIds.value = foundEventIds;
+        
+        console.log(`全局轨迹显示成功: 找到 ${data.count} 条轨迹`);
+        console.log('相关事件ID列表:', foundEventIds);
+      } else {
+        alert('未找到相关轨迹');
+      }
+    } else {
+      throw new Error(data.error || '未知错误');
+    }
+    
+  } catch (error) {
+    console.error('执行全局搜索失败:', error);
+    alert(`搜索失败: ${error.message}`);
   } finally {
     isGlobalTrajectoryLoading.value = false;
   }
@@ -901,6 +949,8 @@ onMounted(async () => {
        flex-direction: column; 
        overflow: hidden; 
        gap: 15px; 
+       // 确保中间区域能撑满剩余空间
+       width: 100%;
     }
 
     .center-panel {
@@ -975,19 +1025,27 @@ onMounted(async () => {
         padding: 10px;
         border-radius: 4px;
         margin-bottom: 15px; 
-        flex-shrink: 0; // Don't let it shrink too much
-        max-height: 30%; // Reduce slightly more for chart
-        overflow-y: auto;
+        flex-grow: 1; // Allow it to grow to fill the panel
+        display: flex;
+        flex-direction: column;
+        overflow: hidden; // Prevent container scroll, let content scroll
     }
     .event-details h3 {
         margin-top: 0;
         color: var(--primary-color, #00ffff);
         margin-bottom: 10px; 
+        flex-shrink: 0;
+    }
+    .event-content {
+        flex-grow: 1;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
     }
     .event-content pre {
         white-space: pre-wrap; 
         word-wrap: break-word;
-        max-height: 150px; 
+        flex-grow: 1; // Fill available space
         overflow-y: auto; 
         background-color: rgba(0,0,0,0.2);
         padding: 5px;
@@ -995,24 +1053,31 @@ onMounted(async () => {
         color: #eee; 
         font-family: monospace;
         font-size: 0.9em;
+        margin-bottom: 10px;
     }
     .event-actions {
         display: flex;
+        flex-shrink: 0;
         flex-direction: column;
-        gap: 8px;
+        gap: 10px;
         margin-top: 10px;
     }
     
-    .play-button, .trajectory-button {
+    .play-button, .trajectory-button, .global-trajectory-button {
+        width: 100%;
         background-color: var(--primary-color, #00ffff);
         color: #001529;
         border: none;
-        padding: 8px 12px;
+        padding: 10px 12px;
         border-radius: 4px;
         cursor: pointer;
         transition: all 0.3s;
         font-size: 0.9em;
-        font-weight: 500;
+        font-weight: 600;
+        text-align: center;
+        display: flex;
+        justify-content: center;
+        align-items: center;
         
         &:hover { 
             background-color: #fff; 
@@ -1210,21 +1275,17 @@ onMounted(async () => {
        overflow: hidden; // Hide overflow for the panel
        flex-shrink: 0; 
        
-       .right-panel-section { // Style for sections within right panel
-           overflow: hidden; // Allow internal scrolling
-           display: flex; // Needed for flex-grow on child component
+       // 让右侧面板内容自动填充
+       .right-panel-section { 
+           overflow: hidden; 
+           display: flex; 
            flex-direction: column;
+           flex-grow: 1; // 让内容区域填充整个面板
        }
        
        .right-panel-top { 
-           flex-shrink: 0; /* Prevent top from shrinking too much */
-           /* Adjust height/max-height if needed */
-           max-height: 45%; // Example max height
-       }
-       
-       .right-panel-bottom {
-           flex-grow: 1; /* Allow bottom to fill remaining space */
-           min-height: 150px; /* Optional min height */
+           flex-shrink: 0; 
+           height: 100%; // 占满整个右侧面板
        }
   }
 
@@ -1271,6 +1332,73 @@ onMounted(async () => {
         cursor: pointer;
         box-shadow: 0 2px 5px rgba(0,0,0,0.3);
         z-index: 1101; // Ensure close button is above video
+      }
+    }
+  }
+
+  .person-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1200;
+
+    .person-modal-content {
+      background-color: #001529;
+      padding: 25px;
+      border-radius: 8px;
+      border: 1px solid #00ffff;
+      min-width: 300px;
+      text-align: center;
+      box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+
+      h3 {
+        color: #fff;
+        margin-bottom: 20px;
+        font-size: 1.2em;
+      }
+
+      .person-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+        gap: 10px;
+        margin-bottom: 20px;
+        max-height: 300px;
+        overflow-y: auto;
+      }
+
+      .person-select-btn {
+        background-color: rgba(0, 255, 255, 0.1);
+        border: 1px solid #00ffff;
+        color: #00ffff;
+        padding: 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        transition: all 0.3s;
+
+        &:hover {
+          background-color: #00ffff;
+          color: #001529;
+        }
+      }
+
+      .close-modal-btn {
+        background-color: #ff4d4f;
+        color: white;
+        border: none;
+        padding: 8px 20px;
+        border-radius: 4px;
+        cursor: pointer;
+        margin-top: 10px;
+
+        &:hover {
+          background-color: #ff7875;
+        }
       }
     }
   }

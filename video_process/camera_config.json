@@ -111,22 +111,6 @@
                 [525, 1020],
                 [400, 1020]
             ]
-        },
-        {
-            "camera_id": "camera8",
-            "camera_url": "rtsp://admin:neu307neu307@192.168.201.163/cam/realmonitor?channel=1&subtype=0",
-            "pixel_coordinate": [
-                [502, 120],
-                [670, 116],
-                [1154, 720],
-                [223, 720]
-            ],
-            "real_coordinate": [
-                [2584, 350],
-                [2731, 250],
-                [2731, 1023],
-                [2584, 1023]
-            ]
         }
     ]
 }

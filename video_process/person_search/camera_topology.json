@@ -1,0 +1,9 @@
+{
+  "camera1": ["camera2", "camera4"],
+  "camera2": ["camera1", "camera3", "camera5", "camera6"],
+  "camera3": ["camera2", "camera4", "camera5"],
+  "camera4": ["camera1", "camera2", "camera3", "camera7"],
+  "camera5": ["camera2", "camera3"],
+  "camera6": ["camera7", "camera2", "camera3"],
+  "camera7": ["camera4", "camera6"]
+}
