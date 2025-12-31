@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response, render_template
 from flask_cors import CORS
 from queue import Queue
 import threading
@@ -12,16 +12,116 @@ import math
 import random
 import mysql.connector
 from mysql.connector import Error
+import cv2
+import time
 
 from video_process.dataset_process.faiss_server import FaissServer
 from video_process.person_search.person_search_engine import PersonSearchEngine
+
+# Force FFmpeg to use TCP for RTSP to improve stability and avoid UDP packet loss/timeouts
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='monitor_page/templates')
 CORS(app)  # 允许跨域请求
+
+# 摄像头配置路径
+CAMERA_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_process', 'camera_config.json')
+
+# 摄像头类
+class Camera:
+    def __init__(self, camera_id, rtsp_url):
+        self.camera_id = camera_id
+        self.rtsp_url = rtsp_url
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = True
+        self.thread = threading.Thread(target=self.update, args=())
+        self.thread.daemon = True
+        self.thread.start()
+
+    def update(self):
+        while self.running:
+            # Use CAP_FFMPEG explicitly
+            cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+            
+            if not cap.isOpened():
+                logger.warning(f"Warning: Could not open video source for {self.camera_id}. Retrying in 5 seconds...")
+                time.sleep(5)
+                continue
+            
+            # Reduce buffer size to minimize latency
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            logger.info(f"Successfully connected to {self.camera_id}")
+            
+            while self.running and cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    # Resize to reduce bandwidth/CPU usage (Monitor doesn't need 4K)
+                    try:
+                        height, width = frame.shape[:2]
+                        target_width = 640
+                        if width > target_width:
+                            scale = target_width / width
+                            target_height = int(height * scale)
+                            frame = cv2.resize(frame, (target_width, target_height))
+                        
+                        with self.lock:
+                            self.frame = frame
+                    except Exception as e:
+                        logger.error(f"Error processing frame for {self.camera_id}: {e}")
+                else:
+                    logger.warning(f"Lost connection to {self.camera_id}. Reconnecting...")
+                    break
+            
+            cap.release()
+            if self.running:
+                time.sleep(2)
+
+    def get_frame(self):
+        with self.lock:
+            if self.frame is None:
+                return None
+            
+            try:
+                ret, jpeg = cv2.imencode('.jpg', self.frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                if not ret:
+                    return None
+                return jpeg.tobytes()
+            except Exception as e:
+                logger.error(f"Error encoding frame for {self.camera_id}: {e}")
+                return None
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+
+# 全局摄像头字典
+cameras = {}
+
+def load_cameras():
+    global cameras
+    if not os.path.exists(CAMERA_CONFIG_PATH):
+        logger.error(f"Config file not found at {CAMERA_CONFIG_PATH}")
+        return
+
+    try:
+        with open(CAMERA_CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+        
+        for cam_conf in config.get('camera_config', []):
+            cam_id = cam_conf['camera_id']
+            url = cam_conf['camera_url']
+            if cam_id not in cameras:
+                logger.info(f"Initializing camera {cam_id}...")
+                cameras[cam_id] = Camera(cam_id, url)
+                time.sleep(0.5)
+    except Exception as e:
+        logger.error(f"Error loading cameras: {e}")
 
 # 数据库配置
 DB_CONFIG = {
@@ -100,9 +200,54 @@ CAMERA_REGIONS = {
 
 
 
+@app.route('/monitor')
+def monitor():
+    """监控页面"""
+    if not cameras:
+        load_cameras()
+    return render_template('index.html', cameras=list(cameras.keys()))
+
+@app.route('/api/cameras', methods=['GET'])
+def get_cameras():
+    """获取摄像头列表"""
+    try:
+        if not os.path.exists(CAMERA_CONFIG_PATH):
+            return jsonify({"error": "Config file not found"}), 404
+            
+        with open(CAMERA_CONFIG_PATH, 'r') as f:
+            config = json.load(f)
+        return jsonify(config.get('camera_config', []))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+def gen(camera):
+    """视频流生成器"""
+    while True:
+        frame = camera.get_frame()
+        if frame is not None:
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        else:
+            time.sleep(0.1)
+
+@app.route('/video_feed/<camera_id>')
+def video_feed(camera_id):
+    """视频流路由"""
+    if camera_id not in cameras:
+        load_cameras()
+        if camera_id not in cameras:
+            return "Camera not found", 404
+            
+    return Response(gen(cameras[camera_id]),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
 def init_servers():
     """初始化服务器"""
     global faiss_server, person_search_engine, video_description_path, saved_video_path
+    
+    # 初始化摄像头
+    logger.info("Loading cameras...")
+    load_cameras()
     
     base_dir = os.path.join(os.path.dirname(__file__), "video_process")
     video_description_path = os.path.join(base_dir, "video_description.json")

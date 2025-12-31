@@ -2,10 +2,9 @@
   <div class="smart-city">
     <header class="header">
       <h1>智慧监控数据可视化展示</h1>
-       <!-- Add Dropdown Toggle Button -->
-       <button @click="toggleDropdownChat" class="chat-dropdown-toggle-button">
-         <span v-if="!isChatDropdownVisible">对话</span>
-         <span v-else>收起</span>
+       <!-- Monitor Button -->
+       <button @click="goToMonitorPage" class="monitor-button">
+         📹 监控画面
        </button>
     </header>
     <div class="content">
@@ -91,17 +90,14 @@
               :camera-activity-data="cameraActivityForSelectedDate"
             />
          </div>
+         <!-- Bottom Section: Chat -->
+         <div class="right-panel-section right-panel-bottom">
+            <RagChat 
+              @play-video-from-chat="handlePlayVideoFromChat"
+            />
+         </div>
       </div>
     </div>
-
-    <!-- Chat Dropdown Panel -->
-    <div :class="['chat-dropdown-panel', { 'is-visible': isChatDropdownVisible }]">
-       <RagChat 
-         v-if="isChatDropdownVisible" 
-         @play-video-from-chat="handlePlayVideoFromChat" 
-       /> 
-    </div>
-    <!-- End Chat Dropdown Panel -->
 
     <!-- Person Selection Modal -->
     <div v-if="showPersonModal" class="person-modal">
@@ -145,11 +141,28 @@ import DailyEventTypeChart from './components/DailyEventTypeChart.vue'
 // const toggleChat = () => { ... };
 
 // Add state for the new dropdown chat
-const isChatDropdownVisible = ref(false);
+// const isChatDropdownVisible = ref(false);
 
-const toggleDropdownChat = () => {
-  isChatDropdownVisible.value = !isChatDropdownVisible.value;
+const goToMonitorPage = () => {
+  // Assuming the monitor page is served at /monitor or a separate port
+  // Since it's a separate Flask app, we might need to know its URL.
+  // For now, let's assume it's on the same host but we need to link to it.
+  // If it's a separate app, maybe we just open a new tab.
+  // The user said "click to jump to that page".
+  // Let's assume it's served at /monitor/index.html or similar if integrated,
+  // or a different port.
+  // Given the file structure, monitor_page is a separate app.
+  // Let's assume we will serve it via the main app or link to it.
+  // For now, I'll just put a placeholder alert or link to the file.
+  // Wait, the user said "integrate this page".
+  // If I can't merge the apps easily, I might just link to the other port if running.
+  // But better: serve the static file from the main app.
+  
+  // I will serve the monitor page from the main app.
+  // I need to add a route in api_server.py to serve the monitor page.
+  window.open('/monitor', '_blank');
 };
+
 
 
 // 使用数据中存在的日期，而不是今天
@@ -1280,12 +1293,17 @@ onMounted(async () => {
            overflow: hidden; 
            display: flex; 
            flex-direction: column;
-           flex-grow: 1; // 让内容区域填充整个面板
        }
        
        .right-panel-top { 
            flex-shrink: 0; 
-           height: 100%; // 占满整个右侧面板
+       }
+
+       .right-panel-bottom {
+           flex-grow: 1;
+           min-height: 0;
+           border-top: 1px solid rgba(0, 255, 255, 0.1);
+           padding-top: 15px;
        }
   }
 
@@ -1404,8 +1422,8 @@ onMounted(async () => {
   }
 }
 
-// Styles for the NEW Dropdown Chat
-.chat-dropdown-toggle-button {
+// Styles for the Monitor Button
+.monitor-button {
   position: absolute;
   top: 50%;
   right: 20px;
@@ -1417,60 +1435,11 @@ onMounted(async () => {
   border-radius: 4px;
   cursor: pointer;
   font-weight: bold;
-  z-index: 11; // Ensure button is above content but below dropdown panel maybe
+  z-index: 11; 
   transition: background-color 0.3s;
 
   &:hover {
     background-color: #fff;
   }
 }
-
-.chat-dropdown-panel {
-  position: absolute;
-  top: 60px; // Position below the header (adjust if header height changes)
-  right: 15px; // Align with content padding
-  width: 350px; // Match the width of the original right panel idea
-  max-height: calc(100vh - 80px); // Limit height, leave some space at bottom
-  background-color: rgba(0, 21, 41, 0.95); // More opaque background
-  border: 1px solid var(--primary-color, #00ffff);
-  border-top: none; // Optional: remove top border if it touches header
-  border-radius: 0 0 4px 4px; // Round bottom corners
-  box-shadow: 0 5px 15px rgba(0, 255, 255, 0.2);
-  z-index: 1050; // Ensure it's above content but below modals
-  overflow: hidden; // Prevent content overflow before transition
-  display: flex; // Use flex for internal layout
-  flex-direction: column;
-  
-  // Animation part
-  transform: translateY(-110%); // Start completely hidden above
-  transition: transform 0.4s ease-in-out, opacity 0.4s ease-in-out;
-  opacity: 0; // Start invisible
-  pointer-events: none; // Prevent interaction when hidden
-
-  &.is-visible {
-    transform: translateY(0); // Slide down into view
-    opacity: 1; // Become visible
-    pointer-events: auto; // Allow interaction when visible
-  }
-
-  // Ensure RagChat component inside fills the space and scrolls
-  > :deep(.rag-chat-container) { // Assuming RagChat has a root element with this class
-      flex-grow: 1;
-      overflow-y: auto; // Allow internal scrolling
-      padding: 15px; // Add padding inside the dropdown
-      height: 100%; // Try to force height (might depend on RagChat structure)
-  }
-   // Fallback if RagChat's root is different or deeper
-   > :deep(div:first-child) { 
-       flex-grow: 1;
-       display: flex;
-       flex-direction: column;
-       overflow-y: auto;
-       padding: 15px; 
-   }
-
-}
-
-
-
 </style> 
