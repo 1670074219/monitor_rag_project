@@ -56,6 +56,23 @@
             font-size: 0.8em;
             color: #666;
         }
+        
+        /* Back Button */
+        .back-button {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            padding: 10px 20px;
+            background-color: #333;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: bold;
+            transition: background-color 0.3s;
+        }
+        .back-button:hover {
+            background-color: #555;
+        }
 
         /* Modal (background) */
         .modal {
@@ -119,6 +136,7 @@
     </style>
 </head>
 <body>
+    <a href="/" class="back-button">← Back to Dashboard</a>
     <h1>Real-time Camera Monitor</h1>
     <p style="text-align: center; color: #666;">Click on any camera to view in full screen</p>
     

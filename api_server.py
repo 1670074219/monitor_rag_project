@@ -254,6 +254,7 @@ def init_servers():
     saved_video_path = os.path.join(base_dir, "saved_video")
     
     # 初始化Faiss服务器
+    logger.info("Initializing FAISS server (this might take a while)...")
     video_dsp_queue = Queue()
     faiss_server = FaissServer(
         emd_model_path="/root/data1/bge_zh_v1.5/",
@@ -261,8 +262,10 @@ def init_servers():
         index_path=os.path.join(base_dir, "faiss_ifl2.index"),
         video_description_path=video_description_path
     )
+    logger.info("FAISS server initialized.")
 
     # 初始化行人搜索引擎
+    logger.info("Initializing Person Search Engine...")
     try:
         person_search_engine = PersonSearchEngine()
         logger.info("PersonSearchEngine 初始化成功")
@@ -1535,4 +1538,8 @@ if __name__ == '__main__':
     init_servers()
     
     # 启动Flask应用
-    app.run(host='0.0.0.0', port=5000, debug=True) 
+    logger.info("Starting Flask app on port 5000...")
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    # from gevent.pywsgi import WSGIServer
+    # http_server = WSGIServer(('0.0.0.0', 5000), app)
+    # http_server.serve_forever() 

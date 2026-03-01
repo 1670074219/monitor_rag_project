@@ -2,7 +2,6 @@ import logging
 import os
 import json
 from ultralytics import YOLO
-import cv2
 import threading
 from datetime import datetime
 import subprocess
@@ -59,7 +58,7 @@ class VideoCaptureServerFFmpeg:
         """使用ffprobe获取视频分辨率和帧率，增加超时和重试"""
         # 解析URL获取IP和端口
         try:
-            from urllib.parse import urlparse, parse_qs
+            from urllib.parse import urlparse
             parsed = urlparse(camera_url)
             host_port = parsed.netloc.split('@')[-1]  # 获取主机:端口部分
             if ':' in host_port:
@@ -70,27 +69,15 @@ class VideoCaptureServerFFmpeg:
                 port = 554  # 默认RTSP端口
         except Exception as e:
             logger.error(f"URL解析失败: {e}")
-            host, port = "192.168.201.164", 554  # 默认值
 
         # 检查网络连通性
         if not check_network_connectivity(host, port):
             logger.error(f"无法连接到 {host}:{port}，请检查网络配置")
-            return 640, 480, 25.0
-
-        # 修正URL：明确指定端口号
-        corrected_url = camera_url
-        if ":554/" not in camera_url and "192.168." in camera_url:
-            base_parts = camera_url.split('/')
-            host_part = base_parts[2]
-            path_part = '/'.join(base_parts[3:])
-            if ':' not in host_part:
-                corrected_url = f"rtsp://{host_part}:554/{path_part}"
-            else:
-                corrected_url = camera_url  # 已经包含端口
+            return 1280, 720, 25.0
         
         for attempt in range(3):
             try:
-                logger.info(f"正在获取视频信息: {corrected_url} (尝试 {attempt + 1})")
+                logger.info(f"正在获取视频信息: {camera_url} (尝试 {attempt + 1})")
                 
                 # 使用正确的 ffprobe 参数（类似命令行成功版本）
                 probe_cmd = [
@@ -98,7 +85,7 @@ class VideoCaptureServerFFmpeg:
                     '-v', 'error',
                     '-rtsp_transport', 'tcp',
                     '-stimeout', '5000000',  # 使用 stimeout 而不是 timeout
-                    '-i', corrected_url,
+                    '-i', camera_url,
                     '-show_streams',
                     '-select_streams', 'v:0',
                     '-print_format', 'json'
@@ -109,14 +96,12 @@ class VideoCaptureServerFFmpeg:
                 
                 if result.returncode == 0:
                     try:
-                        import re
                         # 从 ffprobe 输出中提取信息
                         info = json.loads(result.stdout)
                         if 'streams' in info and len(info['streams']) > 0:
                             stream = info['streams'][0]
                             width = int(stream['width'])
                             height = int(stream['height'])
-                            
                             # 解析帧率
                             avg_frame_rate = stream.get('avg_frame_rate', '25/1')
                             if avg_frame_rate and avg_frame_rate != '0/0':
@@ -146,46 +131,45 @@ class VideoCaptureServerFFmpeg:
             
             time.sleep(2) # 等待2秒后重试
         
-        logger.error(f"无法获取视频信息，使用默认值 640x480 @ 25 FPS")
-        return 640, 480, 25.0
+        logger.error(f"无法获取视频信息，使用默认值 1280x720 @ 25 FPS")
+        return 1280, 720, 25.0
 
     def _frame_grabber_loop(self, camera_id: str, camera_url: str, frame_queue: Queue):
         """
         单一职责：持续从摄像头拉取视频帧并放入队列。
         包含自动重连和指数退避逻辑。
         """
-        width, height, _ = self.camera_states[camera_id]['resolution']
+        width, height, fps = self.camera_states[camera_id]['resolution']
         retry_delay = 1
 
         while self.running:
             try:
                 logger.info(f"[{camera_id}] 启动拉流进程...")
                 
-                # 修正URL：明确指定端口号
-                corrected_url = camera_url
-                if ":554/" not in camera_url and "192.168." in camera_url:
-                    base_parts = camera_url.split('/')
-                    host_part = base_parts[2]
-                    path_part = '/'.join(base_parts[3:])
-                    if ':' not in host_part:
-                        corrected_url = f"rtsp://{host_part}:554/{path_part}"
-                    else:
-                        corrected_url = camera_url  # 已经包含端口
+                # # 修正URL：明确指定端口号
+                # corrected_url = camera_url
+                # if ":554/" not in camera_url and "192.168." in camera_url:
+                #     base_parts = camera_url.split('/')
+                #     host_part = base_parts[2]
+                #     path_part = '/'.join(base_parts[3:])
+                #     if ':' not in host_part:
+                #         corrected_url = f"rtsp://{host_part}:554/{path_part}"
+                #     else:
+                #         corrected_url = camera_url  # 已经包含端口
 
-                logger.info(f"[{camera_id}] 使用修正后的RTSP URL: {corrected_url}")
+                # logger.info(f"[{camera_id}] 使用修正后的RTSP URL: {corrected_url}")
                 
-                # 使用正确的 ffmpeg 参数（类似命令行成功版本）
                 command = [
                     'ffmpeg',
                     '-rtsp_transport', 'tcp',
                     '-stimeout', '5000000',  # 使用 stimeout 而不是 timeout
-                    '-i', corrected_url,
+                    '-i', camera_url,
                     '-f', 'rawvideo',
                     '-pix_fmt', 'bgr24',
                     '-vcodec', 'rawvideo',
                     '-an',  # 禁用音频
                     '-sn',  # 禁用字幕
-                    '-r', '25', # 指定拉流帧率
+                    '-r', str(fps), # 指定拉流帧率
                     '-'
                 ]
                 
@@ -252,11 +236,11 @@ class VideoCaptureServerFFmpeg:
         # 设定目标录制帧率，例如 5 FPS
         # 这意味着无论原始流是多少，我们每秒只处理和录制 5 帧
         # 这能保证视频播放速度正常，只要 YOLO 处理速度 > 5 FPS
-        TARGET_FPS = 10
-        frame_interval = 1.0 / TARGET_FPS
-        last_process_time = 0
+        # TARGET_FPS = 10
+        # frame_interval = 1.0 / TARGET_FPS
+        # last_process_time = 0
         
-        width, height, _ = self.camera_states[camera_id]['resolution']
+        width, height, fps = self.camera_states[camera_id]['resolution']
 
         while self.running:
             try:
@@ -265,12 +249,12 @@ class VideoCaptureServerFFmpeg:
                 # 但由于 Grabber 已经在丢弃旧帧，这里直接取应该比较新
                 frame = frame_queue.get(timeout=1.0)
                 
-                current_time = time.time()
+                # current_time = time.time()
                 # 基于时间控制处理频率
-                if current_time - last_process_time < frame_interval:
-                    continue
+                # if current_time - last_process_time < frame_interval:
+                #     continue
                 
-                last_process_time = current_time
+                # last_process_time = current_time
                 
                 # YOLO人员检测
                 results = self.yolo_model(frame, verbose=False, classes=[0])
@@ -289,9 +273,9 @@ class VideoCaptureServerFFmpeg:
                     filename = os.path.join(self.saved_video_path, f"{camera_id}_{timestamp}.mp4")
                     
                     # 使用固定的 TARGET_FPS 启动录制
-                    if self._start_ffmpeg_recording(camera_id, filename, width, height, TARGET_FPS):
+                    if self._start_ffmpeg_recording(camera_id, filename, width, height, fps):
                         is_recording = True
-                        logger.info(f"[{camera_id}] 开始录制: {filename} (FPS: {TARGET_FPS})")
+                        logger.info(f"[{camera_id}] 开始录制: {filename} (FPS: {fps})")
                 
                 # 停止录制
                 if no_person_frames >= self.no_person_frames_threshold and is_recording:
