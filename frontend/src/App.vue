@@ -160,6 +160,24 @@ const goToMonitorPage = () => {
   
   // I will serve the monitor page from the main app.
   // I need to add a route in api_server.py to serve the monitor page.
+  // window.open('/monitor', '_blank');
+  
+  // Use the API base URL to construct the monitor URL
+  // If apiBaseUrl is relative (e.g. /api), we need to handle it.
+  // But usually for dev it's proxied.
+  // However, window.open('/monitor') opens relative to frontend origin (port 3001).
+  // Vite proxy is configured to forward /monitor to backend (port 5000).
+  // So window.open('/monitor', '_blank') SHOULD work if the proxy is set up correctly.
+  // But if it's not working, maybe the proxy isn't catching it or it's redirecting.
+  
+  // Let's try to force the backend URL if possible, or ensure the proxy works.
+  // Since I just added the proxy config in vite.config.js, it should work after restart.
+  // But to be safe, let's try to use the absolute URL if we know it.
+  // In production, they are likely on the same origin.
+  // In dev, they are different.
+  
+  // If I use window.location.origin + '/monitor', it goes through Vite.
+  // Vite proxy should handle it.
   window.open('/monitor', '_blank');
 };
 

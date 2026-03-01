@@ -12,12 +12,23 @@ import signal
 import sys
 import socket
 import math
+import re
+import pymysql
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 base_dir = os.path.dirname(__file__)
+
+DB_CONFIG = {
+    'host': '219.216.99.30',
+    'port': 3306,
+    'database': 'monitor_database',
+    'user': 'root',
+    'password': 'q1w2e3az',
+    'charset': 'utf8mb4',
+}
 
 def check_network_connectivity(ip, port):
     """检查网络连通性"""
@@ -65,6 +76,54 @@ class VideoCaptureServerFFmpeg:
         
         self.running = True
         self.camera_states = {} # 存储每个摄像头的状态、线程和队列
+
+    def _parse_created_time_from_video_name(self, video_name: str):
+        """从 video_name 提取创建时间，格式: camera1_20260301_130245 -> 2026-03-01 13:02:45"""
+        match = re.search(r'(\d{8})_(\d{6})', video_name)
+        if not match:
+            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            dt = datetime.strptime(f"{match.group(1)}{match.group(2)}", "%Y%m%d%H%M%S")
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _save_video_to_database(self, video_name: str, video_path: str):
+        """将视频元数据写入 monitor_database.videos 表。"""
+        conn = None
+        try:
+            conn = pymysql.connect(
+                host=DB_CONFIG['host'],
+                port=DB_CONFIG['port'],
+                user=DB_CONFIG['user'],
+                password=DB_CONFIG['password'],
+                database=DB_CONFIG['database'],
+                charset=DB_CONFIG['charset'],
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=False
+            )
+
+            created_time = self._parse_created_time_from_video_name(video_name)
+            insert_sql = """
+                INSERT INTO videos (video_name, video_path, person_count, description, created_time)
+                VALUES (%s, %s, %s, %s, %s)
+            """
+
+            with conn.cursor() as cursor:
+                cursor.execute(insert_sql, (video_name, video_path, 0, None, created_time))
+
+            conn.commit()
+            logger.info(f"已写入数据库 videos 表: {video_name}")
+            return True
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"写入数据库失败({video_name}): {e}")
+            return False
+        finally:
+            if conn:
+                conn.close()
 
     def get_video_resolution(self, camera_url: str):
         """使用ffprobe获取视频分辨率和帧率，增加超时和重试"""
@@ -542,6 +601,9 @@ class VideoCaptureServerFFmpeg:
                     json.dump(video_data, f, indent=4, ensure_ascii=False)
                 
                 logger.info(f"已更新JSON描述: {v_k}")
+
+                # 同步写入数据库 videos 表（与 JSON 双写，保持兼容）
+                self._save_video_to_database(v_k, output_file)
         
                 if self.video_queue is not None:
                     self.video_queue.put(v_k)

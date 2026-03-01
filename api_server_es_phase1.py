@@ -15,7 +15,7 @@ from mysql.connector import Error
 import cv2
 import time
 
-from video_process.dataset_process.faiss_server import FaissServer
+from video_process.dataset_process.elasticsearch_worker import ElasticSearchWorker
 from video_process.person_search.person_search_engine import PersonSearchEngine
 
 # Force FFmpeg to use TCP for RTSP to improve stability and avoid UDP packet loss/timeouts
@@ -145,7 +145,7 @@ def get_db_connection():
         return None
 
 # 全局变量
-faiss_server = None
+es_worker = None
 person_search_engine = None
 video_description_path = None
 saved_video_path = None
@@ -243,7 +243,7 @@ def video_feed(camera_id):
 
 def init_servers():
     """初始化服务器"""
-    global faiss_server, person_search_engine, video_description_path, saved_video_path
+    global es_worker, person_search_engine, video_description_path, saved_video_path
     
     # 初始化摄像头
     logger.info("Loading cameras...")
@@ -253,16 +253,20 @@ def init_servers():
     video_description_path = os.path.join(base_dir, "video_description.json")
     saved_video_path = os.path.join(base_dir, "saved_video")
     
-    # 初始化Faiss服务器
-    logger.info("Initializing FAISS server (this might take a while)...")
-    video_dsp_queue = Queue()
-    faiss_server = FaissServer(
+    # =========================
+    # 【阶段一-仅替换搜索大动脉】
+    # 将原 FAISS 检索实例替换为 ElasticSearchWorker。
+    # 注意：轨迹/事件/视频信息相关逻辑保持不变。
+    # =========================
+    logger.info("Initializing Elasticsearch worker (phase-1 query migration)...")
+    es_worker = ElasticSearchWorker(
         emd_model_path="/root/data1/bge_zh_v1.5/",
-        video_dsp_queue=video_dsp_queue,
-        index_path=os.path.join(base_dir, "faiss_ifl2.index"),
-        video_description_path=video_description_path
+        video_dsp_queue=Queue(),
+        db_config=DB_CONFIG,
+        es_url="http://219.216.99.30:9200",
+        index_name="video_logs_index"
     )
-    logger.info("FAISS server initialized.")
+    logger.info("Elasticsearch worker initialized.")
 
     # 初始化行人搜索引擎
     logger.info("Initializing Person Search Engine...")
@@ -293,12 +297,24 @@ def query():
             }), 400
         
         logger.info(f"收到查询请求: {query_text}")
+
+        # =========================
+        # 【阶段一-仅替换搜索链路】
+        # 只替换 /api/query 的检索后端为 ES Hybrid Search。
+        # 其余轨迹/事件接口一律保持原状。
+        # =========================
+        if not es_worker:
+            return jsonify({
+                'status': 'error',
+                'error_message': 'ES检索服务未初始化'
+            }), 500
         
-        # 使用混合搜索
+        # 保持原有参数语义
         k = data.get('k', 5)  # 默认返回5个结果
-        alpha = data.get('alpha', 0.7)  # Faiss权重，默认0.7
+        alpha = data.get('alpha', 0.7)  # 语义检索权重，默认0.7
         
-        search_results = faiss_server.hybrid_search(query_text, k=k, alpha=alpha)
+        # ES 返回结构: [{"video_id": int, "description": str, "score": float}, ...]
+        search_results = es_worker.hybrid_search(query_text, k=k, alpha=alpha)
         
         if not search_results:
             return jsonify({
@@ -309,28 +325,58 @@ def query():
                 }
             })
         
-        # 读取视频描述数据
-        with open(video_description_path, 'r', encoding='utf-8') as f:
-            video_data = json.load(f)
+        # =========================
+        # 将 ES 结果中的 video_id 映射回前端沿用的 video_name (v_k)
+        # =========================
+        result_video_ids = [item.get('video_id') for item in search_results if item.get('video_id') is not None]
+        if not result_video_ids:
+            return jsonify({
+                'status': 'success',
+                'data': {
+                    '相关日志': [],
+                    '总结报告': '没有找到相关的监控记录。'
+                }
+            })
+
+        conn = None
+        cursor = None
+        id_to_name = {}
+        try:
+            conn = get_db_connection()
+            if conn:
+                cursor = conn.cursor(dictionary=True)
+                placeholders = ','.join(['%s'] * len(result_video_ids))
+                sql = f"SELECT id, video_name FROM videos WHERE id IN ({placeholders})"
+                cursor.execute(sql, tuple(result_video_ids))
+                rows = cursor.fetchall()
+                id_to_name = {int(row['id']): row['video_name'] for row in rows if row.get('video_name')}
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
         
         # 构建相关日志数据
         related_logs = []
         summaries = []
-        
-        for v_k, score in search_results:
-            if v_k in video_data:
-                v_info = video_data[v_k]
-                
-                # 构建日志条目
-                log_entry = {
-                    f"{v_k}日志": v_k,
-                    f"{v_k}概述": v_info.get('analyse_result', '无描述')[:100] + ('...' if len(v_info.get('analyse_result', '')) > 100 else '')
-                }
-                related_logs.append(log_entry)
-                
-                # 收集完整描述用于总结
-                if v_info.get('analyse_result'):
-                    summaries.append(f"时间{v_k}: {v_info['analyse_result']}")
+
+        # 直接使用 ES 返回的 description，保持原返回结构不变
+        for item in search_results:
+            video_id = item.get('video_id')
+            description = (item.get('description') or '').strip()
+            if video_id is None:
+                continue
+
+            v_k = id_to_name.get(int(video_id), str(video_id))
+
+            log_entry = {
+                f"{v_k}日志": v_k,
+                f"{v_k}概述": description[:100] + ('...' if len(description) > 100 else '')
+            }
+            related_logs.append(log_entry)
+
+            if description:
+                summaries.append(f"时间{v_k}: {description}")
         
         # 生成总结报告
         summary_base = f"基于查询{query_text}，找到{len(search_results)}条相关监控记录。"
@@ -536,10 +582,24 @@ def get_video_info(video_key):
 @app.route('/api/health')
 def health_check():
     """健康检查接口"""
+    # =========================
+    # 【阶段一-健康检查切换到ES】
+    # =========================
+    es_alive = False
+    index_total = 0
+    if es_worker:
+        try:
+            es_alive = bool(es_worker.es.ping())
+            if es_alive:
+                index_total = int(es_worker.es.count(index=es_worker.index_name).get('count', 0))
+        except Exception as e:
+            logger.warning(f"健康检查读取ES状态失败: {e}")
+
     return jsonify({
         'status': 'healthy',
-        'faiss_ready': faiss_server is not None,
-        'index_total': faiss_server.index.ntotal if faiss_server and faiss_server.index else 0
+        'es_ready': es_worker is not None,
+        'es_alive': es_alive,
+        'index_total': index_total
     })
 
 @app.route('/api/stats')
@@ -552,12 +612,22 @@ def get_stats():
         total_videos = len(video_data)
         analyzed_videos = sum(1 for v in video_data.values() if v.get('analyse_result'))
         embedded_videos = sum(1 for v in video_data.values() if v.get('is_embedding'))
+
+        # =========================
+        # 【阶段一-统计中的索引规模切换到ES】
+        # =========================
+        index_size = 0
+        if es_worker:
+            try:
+                index_size = int(es_worker.es.count(index=es_worker.index_name).get('count', 0))
+            except Exception as e:
+                logger.warning(f"读取ES索引数量失败: {e}")
         
         return jsonify({
             'total_videos': total_videos,
             'analyzed_videos': analyzed_videos,
             'embedded_videos': embedded_videos,
-            'index_size': faiss_server.index.ntotal if faiss_server and faiss_server.index else 0
+            'index_size': index_size
         })
         
     except Exception as e:
@@ -1497,12 +1567,15 @@ def calculate_keyword_similarity(target_keywords, content):
 def calculate_semantic_similarity(text1, text2):
     """计算语义相似度"""
     try:
-        if not faiss_server:
+        # =========================
+        # 【阶段一-语义相似度模型来源切换】
+        # =========================
+        if not es_worker:
             return 0.0
         
-        # 使用FAISS服务器的嵌入模型计算相似度
-        embedding1 = faiss_server.embedding_model.encode([text1])
-        embedding2 = faiss_server.embedding_model.encode([text2])
+        # 使用 ES Worker 持有的嵌入模型计算相似度
+        embedding1 = es_worker.embedding_model.encode([text1])
+        embedding2 = es_worker.embedding_model.encode([text2])
         
         # 计算余弦相似度
         import numpy as np
