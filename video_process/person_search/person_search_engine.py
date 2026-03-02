@@ -66,6 +66,32 @@ class PersonSearchEngine:
         match = re.match(r'(camera\d+)', video_name)
         return match.group(1) if match else None
 
+    def get_persons_in_video(self, video_id):
+        """获取指定视频中的所有候选人（用于前端展示）"""  # 新增：用于前端展示
+        conn = self.get_connection()  # 新增：连接数据库
+        if not conn:
+            return []
+
+        cursor = None
+        try:
+            cursor = conn.cursor(dictionary=True)
+            sql = """
+                SELECT person_index, person_image_path
+                FROM video_vectors
+                WHERE video_id = %s
+                ORDER BY person_index
+            """  # 新增：只查询前端需要的候选人字段
+            cursor.execute(sql, (video_id,))
+            return cursor.fetchall() or []  # 新增：返回字典列表供前端直接使用
+        except Exception as e:
+            print(f"❌ 获取视频候选人失败: {e}")
+            return []
+        finally:
+            if cursor:
+                cursor.close()
+            if conn and conn.is_connected():
+                conn.close()
+
     def search_target(self, target_video_id, target_person_index, time_window=10):
         """
         核心搜索函数
@@ -126,7 +152,7 @@ class PersonSearchEngine:
                 # 使用 %camera% 匹配，但在 Python 中进行精确过滤以避免 camera1 匹配 camera10
                 sql_candidates = """
                     SELECT v.id as video_id, v.video_name, v.created_time, 
-                           vv.person_index, vv.vector_data, vv.person_trajectory
+                          vv.person_index, vv.vector_data, vv.person_trajectory, vv.person_image_path
                     FROM videos v
                     JOIN video_vectors vv ON v.id = vv.video_id
                     WHERE v.video_name LIKE %s 
@@ -157,6 +183,7 @@ class PersonSearchEngine:
                             "video_id": cand['video_id'],
                             "video_name": cand['video_name'],
                             "person_index": cand['person_index'],
+                            "image_path": cand['person_image_path'],  # 新增：用于前端展示匹配目标图像
                             "similarity": score,
                             "time": cand['created_time'].strftime('%Y-%m-%d %H:%M:%S') if isinstance(cand['created_time'], datetime) else str(cand['created_time']),
                             "trajectory": json.loads(cand['person_trajectory'])

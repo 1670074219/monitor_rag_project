@@ -149,6 +149,7 @@ es_worker = None
 person_search_engine = None
 video_description_path = None
 saved_video_path = None
+person_crops_path = None
 
 # 全局布局配置
 LAYOUT_CONFIG = {
@@ -243,7 +244,7 @@ def video_feed(camera_id):
 
 def init_servers():
     """初始化服务器"""
-    global es_worker, person_search_engine, video_description_path, saved_video_path
+    global es_worker, person_search_engine, video_description_path, saved_video_path, person_crops_path
     
     # 初始化摄像头
     logger.info("Loading cameras...")
@@ -252,6 +253,7 @@ def init_servers():
     base_dir = os.path.join(os.path.dirname(__file__), "video_process")
     video_description_path = os.path.join(base_dir, "video_description.json")
     saved_video_path = os.path.join(base_dir, "saved_video")
+    person_crops_path = os.path.join(base_dir, "person_crops")
     
     # =========================
     # 【阶段一-仅替换搜索大动脉】
@@ -405,7 +407,7 @@ def query():
 
 @app.route('/api/video_persons/<video_id>', methods=['GET'])
 def get_video_persons(video_id):
-    """获取视频中出现的所有人物索引"""
+    """获取视频中出现的所有人物（含可选图片路径）"""
     conn = None
     cursor = None
     try:
@@ -429,11 +431,25 @@ def get_video_persons(video_id):
             else:
                 return jsonify({'error': '视频不存在'}), 404
 
-        sql = "SELECT DISTINCT person_index FROM video_vectors WHERE video_id = %s ORDER BY person_index"
-        cursor.execute(sql, (real_video_id,))
-        results = cursor.fetchall()
-        
-        persons = [row['person_index'] for row in results]
+        if not person_search_engine:
+            return jsonify({'error': '搜索引擎未初始化'}), 500
+
+        results = person_search_engine.get_persons_in_video(real_video_id)
+        unique_persons_dict = {}
+        for row in results:
+            person_index = row.get('person_index')
+            if person_index is None:
+                continue
+            if person_index not in unique_persons_dict:
+                unique_persons_dict[person_index] = {
+                    'person_index': person_index,
+                    'person_image_path': row.get('person_image_path')
+                }
+
+        persons = [
+            unique_persons_dict[idx]
+            for idx in sorted(unique_persons_dict.keys())
+        ]
         
         return jsonify({
             'video_id': real_video_id,
@@ -446,6 +462,22 @@ def get_video_persons(video_id):
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
+
+@app.route('/api/person_crops/<path:filename>', methods=['GET'])
+def get_person_crop(filename):
+    """提供人物裁剪图静态访问"""
+    try:
+        if not person_crops_path or not os.path.exists(person_crops_path):
+            return jsonify({'error': '人物图片目录不存在'}), 404
+
+        normalized_filename = os.path.normpath(filename).replace('\\', '/')
+        if normalized_filename.startswith('..') or os.path.isabs(normalized_filename):
+            return jsonify({'error': '非法路径'}), 400
+
+        return send_from_directory(person_crops_path, normalized_filename)
+    except Exception as e:
+        logger.error(f"获取人物图片失败: {e}")
+        return jsonify({'error': '获取人物图片失败'}), 500
 
 @app.route('/api/global_trajectory', methods=['POST'])
 def global_trajectory():
@@ -597,6 +629,8 @@ def health_check():
 
     return jsonify({
         'status': 'healthy',
+        'service': 'api_server_es_phase1',
+        'query_backend': 'elasticsearch',
         'es_ready': es_worker is not None,
         'es_alive': es_alive,
         'index_total': index_total
@@ -1086,77 +1120,144 @@ def get_3d_config():
 @app.route('/api/events_3d')
 def get_events_3d():
     """获取3D显示用的事件数据"""
+    conn = None
+    cursor = None
     try:
-        # 直接使用video_description.json文件
-        with open(video_description_path, 'r', encoding='utf-8') as f:
-            video_data = json.load(f)
-        
+        # 读取 JSON 作为分析文本/兼容回退
+        video_data = {}
+        if video_description_path and os.path.exists(video_description_path):
+            try:
+                with open(video_description_path, 'r', encoding='utf-8') as f:
+                    video_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"读取 video_description.json 失败，将仅使用DB: {e}")
+
+        conn = get_db_connection()
+        if not conn:
+            logger.warning("events_3d 数据源回退到 JSON：数据库连接失败")
+            if not video_data:
+                return jsonify([])
+
+            events = []
+            for video_key, video_info in video_data.items():
+                event_info = parse_event_filename(video_key)
+                if not event_info:
+                    camera_id = video_key.split('_')[0] if '_' in video_key else 'camera1'
+                    timestamp = parse_video_key_to_timestamp(video_key)
+                    if not timestamp:
+                        continue
+                    event_info = {
+                        'camera_id': camera_id,
+                        'timestamp': timestamp,
+                        'sequence': 0,
+                        'original_filename': video_key
+                    }
+
+                has_trajectory = 'trajectory_data' in video_info and 'trajectories' in video_info['trajectory_data']
+                if has_trajectory and video_info['trajectory_data']['trajectories']:
+                    first_trajectory = video_info['trajectory_data']['trajectories'][0]
+                    if first_trajectory.get('coordinates') and len(first_trajectory['coordinates'][0]) >= 2:
+                        start_coord = first_trajectory['coordinates'][0]
+                        position = {'pixel_x': start_coord[0], 'pixel_y': start_coord[1]}
+                    else:
+                        position = generate_random_position_in_area(event_info['camera_id'], video_key)
+                else:
+                    position = generate_random_position_in_area(event_info['camera_id'], video_key)
+
+                if not position:
+                    continue
+
+                analyse_result = video_info.get('analyse_result', '')
+                abnormal_keywords = ['异常', '打架', '闯入', '跌倒', '争执', '暴力', '紧急', '危险']
+                is_abnormal = any(keyword in analyse_result for keyword in abnormal_keywords) if analyse_result else False
+
+                video_file = os.path.basename(video_info['video_path']) if video_info.get('video_path') else None
+                events.append({
+                    'id': video_key,
+                    'timestamp': event_info['timestamp'],
+                    'position': position,
+                    'content': analyse_result or '监控记录',
+                    'videoFile': video_file,
+                    'camera_id': event_info['camera_id'],
+                    'sequence': event_info['sequence'],
+                    'date_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%Y-%m-%d'),
+                    'time_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%H:%M:%S'),
+                    'is_abnormal': is_abnormal,
+                    'type': 'abnormal' if is_abnormal else 'normal',
+                    'has_trajectory': has_trajectory
+                })
+
+            events.sort(key=lambda x: x['timestamp'])
+            logger.info(f"返回 {len(events)} 个3D事件 (数据源: JSON回退)")
+            return jsonify(events)
+
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT id, video_name, video_path, description FROM videos ORDER BY id DESC")
+        db_videos = cursor.fetchall()
+        if not db_videos:
+            logger.info("events_3d: videos 表为空，返回空列表")
+            return jsonify([])
+
+        cursor.execute("SELECT video_id, person_trajectory FROM video_vectors ORDER BY video_id, person_index")
+        vector_rows = cursor.fetchall()
+        first_traj_by_video = {}
+        for row in vector_rows:
+            vid = row.get('video_id')
+            if vid in first_traj_by_video:
+                continue
+            traj_json = row.get('person_trajectory')
+            if not traj_json:
+                continue
+            try:
+                traj_data = json.loads(traj_json) if isinstance(traj_json, str) else traj_json
+                points = traj_data.get('points', []) if isinstance(traj_data, dict) else []
+                if points and len(points[0]) >= 2:
+                    first_traj_by_video[vid] = points[0]
+            except Exception:
+                continue
+
         events = []
-        
-        for video_key, video_info in video_data.items():
-            # 解析事件信息
+        for video in db_videos:
+            video_id = video.get('id')
+            video_name = video.get('video_name') or ''
+            video_path = video.get('video_path') or ''
+            video_key = os.path.splitext(video_name)[0] if video_name else str(video_id)
+
             event_info = parse_event_filename(video_key)
             if not event_info:
-                # 如果新格式解析失败，尝试原有格式
-                camera_id = video_key.split('_')[0] if '_' in video_key else 'camera1'
+                camera_match = re.search(r'(camera\d+)', video_name, re.IGNORECASE)
+                camera_id = camera_match.group(1).lower() if camera_match else 'camera1'
                 timestamp = parse_video_key_to_timestamp(video_key)
                 if not timestamp:
-                    continue
+                    timestamp = int(time.time())
                 event_info = {
                     'camera_id': camera_id,
                     'timestamp': timestamp,
                     'sequence': 0,
                     'original_filename': video_key
                 }
-            
-            # 检查是否有轨迹数据，优先使用轨迹起点作为事件位置
-            has_trajectory = 'trajectory_data' in video_info and 'trajectories' in video_info['trajectory_data']
-            
-            if has_trajectory and video_info['trajectory_data']['trajectories']:
-                # 使用第一条轨迹的起点作为事件位置
-                first_trajectory = video_info['trajectory_data']['trajectories'][0]
-                if first_trajectory.get('coordinates'):
-                    start_coord = first_trajectory['coordinates'][0]
-                    if len(start_coord) >= 2:
-                                                 # 轨迹数据已经是像素坐标，直接使用轨迹起点作为事件位置
-                         position = {
-                             'pixel_x': start_coord[0],  # 直接使用轨迹起点X坐标
-                             'pixel_y': start_coord[1]   # 直接使用轨迹起点Y坐标
-                         }
-                    else:
-                        # 备用：随机位置
-                        position = generate_random_position_in_area(event_info['camera_id'], video_key)
-                else:
-                    # 备用：随机位置  
-                    position = generate_random_position_in_area(event_info['camera_id'], video_key)
+
+            start_point = first_traj_by_video.get(video_id)
+            has_trajectory = bool(start_point)
+            if has_trajectory and len(start_point) >= 2:
+                position = {'pixel_x': start_point[0], 'pixel_y': start_point[1]}
             else:
-                # 在摄像头覆盖区域内生成随机位置
                 position = generate_random_position_in_area(event_info['camera_id'], video_key)
-            
+
             if not position:
                 continue
-            
-            # 检查是否为异常事件
-            is_abnormal = False
-            analyse_result = video_info.get('analyse_result', '')
-            if analyse_result:
-                abnormal_keywords = ['异常', '打架', '闯入', '跌倒', '争执', '暴力', '紧急', '危险']
-                is_abnormal = any(keyword in analyse_result for keyword in abnormal_keywords)
-            
-            # 获取视频文件名
-            video_file = None
-            if video_info.get('video_path'):
-                video_file = os.path.basename(video_info['video_path'])
-            
-            # has_trajectory 已在上面计算过
-            
-            # 构建事件对象
-            event = {
+
+            video_info = video_data.get(video_key, {}) if isinstance(video_data, dict) else {}
+            analyse_result = video.get('description') or video_info.get('analyse_result', '') or '监控记录'
+            abnormal_keywords = ['异常', '打架', '闯入', '跌倒', '争执', '暴力', '紧急', '危险']
+            is_abnormal = any(keyword in analyse_result for keyword in abnormal_keywords)
+
+            events.append({
                 'id': video_key,
                 'timestamp': event_info['timestamp'],
                 'position': position,
-                'content': analyse_result or '监控记录',
-                'videoFile': video_file,
+                'content': analyse_result,
+                'videoFile': os.path.basename(video_path) if video_path else video_name,
                 'camera_id': event_info['camera_id'],
                 'sequence': event_info['sequence'],
                 'date_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%Y-%m-%d'),
@@ -1164,19 +1265,21 @@ def get_events_3d():
                 'is_abnormal': is_abnormal,
                 'type': 'abnormal' if is_abnormal else 'normal',
                 'has_trajectory': has_trajectory
-            }
-            
-            events.append(event)
-        
-        # 按时间戳排序
+            })
+
         events.sort(key=lambda x: x['timestamp'])
-        
-        logger.info(f"返回 {len(events)} 个3D事件")
+        track_count = sum(1 for item in events if item.get('has_trajectory'))
+        logger.info(f"返回 {len(events)} 个3D事件 (数据源: DB优先, 含轨迹事件: {track_count})")
         return jsonify(events)
         
     except Exception as e:
         logger.error(f"获取3D事件数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 @app.route('/api/trajectory/<event_id>')
 def get_event_trajectory(event_id):
@@ -1191,9 +1294,13 @@ def get_event_trajectory(event_id):
         cursor = conn.cursor(dictionary=True)
         
         # 1. 查询视频信息
-        # 尝试匹配 event_id 或 event_id.mp4
-        query_video = "SELECT id, person_count FROM videos WHERE video_name = %s OR video_name = %s"
-        cursor.execute(query_video, (event_id, f"{event_id}.mp4"))
+        # 尝试匹配 id、event_id 或 event_id.mp4
+        if str(event_id).isdigit():
+            query_video = "SELECT id, person_count FROM videos WHERE id = %s OR video_name = %s OR video_name = %s"
+            cursor.execute(query_video, (int(event_id), str(event_id), f"{event_id}.mp4"))
+        else:
+            query_video = "SELECT id, person_count FROM videos WHERE video_name = %s OR video_name = %s"
+            cursor.execute(query_video, (str(event_id), f"{event_id}.mp4"))
         video = cursor.fetchone()
         
         if not video:
@@ -1219,12 +1326,20 @@ def get_event_trajectory(event_id):
             return jsonify({'error': '事件不存在'}), 404
             
         video_id = video['id']
-        person_count = video['person_count']
+        person_count = video.get('person_count', 0)
         
-        # 2. 查询轨迹数据
-        query_vectors = "SELECT person_index, person_trajectory FROM video_vectors WHERE video_id = %s"
-        cursor.execute(query_vectors, (video_id,))
-        vectors = cursor.fetchall()
+        # 2. 查询轨迹数据（优先包含 person_image_path）
+        try:
+            query_vectors = "SELECT person_index, person_trajectory, person_image_path FROM video_vectors WHERE video_id = %s"
+            cursor.execute(query_vectors, (video_id,))
+            vectors = cursor.fetchall()
+        except Exception:
+            # 向后兼容旧库结构
+            query_vectors = "SELECT person_index, person_trajectory FROM video_vectors WHERE video_id = %s"
+            cursor.execute(query_vectors, (video_id,))
+            vectors = cursor.fetchall()
+            for row in vectors:
+                row['person_image_path'] = None
         
         if not vectors:
             return jsonify({'error': '该事件没有轨迹数据'}), 404
@@ -1236,11 +1351,16 @@ def get_event_trajectory(event_id):
                 if not traj_json:
                     continue
                     
-                # 如果是字符串则解析，如果是字典则直接使用
-                if isinstance(traj_json, str):
-                    traj_data = json.loads(traj_json)
-                else:
-                    traj_data = traj_json
+                # 兼容多层字符串化的 JSON
+                traj_data = traj_json
+                while isinstance(traj_data, str):
+                    try:
+                        traj_data = json.loads(traj_data)
+                    except Exception:
+                        break
+
+                if not isinstance(traj_data, dict):
+                    continue
                     
                 # 适配数据格式
                 # 数据库格式: {"unit": "cm", "length": 14, "points": [[x, y], ...]}
@@ -1310,8 +1430,12 @@ def get_event_trajectory_scene_coords(event_id):
         cursor = conn.cursor(dictionary=True)
         
         # 1. 查询视频信息
-        query_video = "SELECT id, person_count FROM videos WHERE video_name = %s OR video_name = %s"
-        cursor.execute(query_video, (event_id, f"{event_id}.mp4"))
+        if str(event_id).isdigit():
+            query_video = "SELECT id, person_count FROM videos WHERE id = %s OR video_name = %s OR video_name = %s"
+            cursor.execute(query_video, (int(event_id), str(event_id), f"{event_id}.mp4"))
+        else:
+            query_video = "SELECT id, person_count FROM videos WHERE video_name = %s OR video_name = %s"
+            cursor.execute(query_video, (str(event_id), f"{event_id}.mp4"))
         video = cursor.fetchone()
         
         # 轨迹颜色列表
@@ -1366,12 +1490,20 @@ def get_event_trajectory_scene_coords(event_id):
             return jsonify({'error': '事件不存在'}), 404
             
         video_id = video['id']
-        person_count = video['person_count']
+        person_count = video.get('person_count', 0)
         
-        # 2. 查询轨迹数据
-        query_vectors = "SELECT person_index, person_trajectory FROM video_vectors WHERE video_id = %s"
-        cursor.execute(query_vectors, (video_id,))
-        vectors = cursor.fetchall()
+        # 2. 查询轨迹数据（优先包含 person_image_path）
+        try:
+            query_vectors = "SELECT person_index, person_trajectory, person_image_path FROM video_vectors WHERE video_id = %s"
+            cursor.execute(query_vectors, (video_id,))
+            vectors = cursor.fetchall()
+        except Exception:
+            # 兼容旧表结构
+            query_vectors = "SELECT person_index, person_trajectory FROM video_vectors WHERE video_id = %s"
+            cursor.execute(query_vectors, (video_id,))
+            vectors = cursor.fetchall()
+            for row in vectors:
+                row['person_image_path'] = None
         
         if not vectors:
             return jsonify({'error': '该事件没有轨迹数据'}), 404
@@ -1383,10 +1515,15 @@ def get_event_trajectory_scene_coords(event_id):
                 if not traj_json:
                     continue
                     
-                if isinstance(traj_json, str):
-                    traj_data = json.loads(traj_json)
-                else:
-                    traj_data = traj_json
+                traj_data = traj_json
+                while isinstance(traj_data, str):
+                    try:
+                        traj_data = json.loads(traj_data)
+                    except Exception:
+                        break
+
+                if not isinstance(traj_data, dict):
+                    continue
                 
                 track_id = vec['person_index']
                 # 数据库中的 points 对应 coordinates
@@ -1409,7 +1546,8 @@ def get_event_trajectory_scene_coords(event_id):
                         'track_id': track_id,
                         'trajectory_length': len(scene_coords),
                         'coordinates': scene_coords,
-                        'color': trajectory_colors[track_id % len(trajectory_colors)]
+                        'color': trajectory_colors[track_id % len(trajectory_colors)],
+                        'person_image_path': vec.get('person_image_path')
                     })
                     
             except Exception as e:

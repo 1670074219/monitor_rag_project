@@ -8,6 +8,7 @@ import { searchForWorkspaceRoot } from 'vite'
 // 获取当前文件的目录，因为 __dirname 在 ES modules 中不可用
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const API_TARGET = process.env.VITE_API_TARGET || 'http://127.0.0.1:5000'
 
 // Plugin to force Content-Type for specific extensions
 const forceContentTypePlugin = () => ({
@@ -103,17 +104,17 @@ export default defineConfig({
     port: 3001,
     proxy: { // Added proxy configuration
       '/api': {
-        target: 'http://0.0.0.0:5000', // 改为容器内部IP，使用0.0.0.0代替localhost
+        target: API_TARGET,
         changeOrigin: true,
         // secure: false, // Uncomment if your backend is http and vite is https (not common in dev)
         // rewrite: (path) => path.replace(/^\/api/, '') // Uncomment if backend API paths don't start with /api
       },
       '/monitor': {
-        target: 'http://0.0.0.0:5000',
+        target: API_TARGET,
         changeOrigin: true
       },
       '/video_feed': {
-        target: 'http://0.0.0.0:5000',
+        target: API_TARGET,
         changeOrigin: true
       }
     },

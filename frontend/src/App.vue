@@ -104,13 +104,25 @@
       <div class="person-modal-content">
         <h3>选择要追踪的人物</h3>
         <div class="person-list">
-          <button 
-            v-for="personIndex in availablePersons" 
-            :key="personIndex"
-            @click="confirmPersonSelection(personIndex)"
+          <button
+            v-for="person in availablePersons"
+            :key="typeof person === 'object' ? person.person_index : person"
+            @click="confirmPersonSelection(person)"
             class="person-select-btn"
           >
-            人物 #{{ personIndex }}
+            <template v-if="typeof person === 'object'">
+              <img
+                v-if="person.person_image_path"
+                :src="`/api/person_crops/${person.person_image_path}`"
+                :alt="`人物 #${person.person_index}`"
+                class="person-thumb"
+              />
+              <div v-else class="person-thumb-placeholder">无图像</div>
+              <div class="person-label">人物 #{{ person.person_index }}</div>
+            </template>
+            <template v-else>
+              人物 #{{ person }}
+            </template>
           </button>
         </div>
         <button class="close-modal-btn" @click="showPersonModal = false">取消</button>
@@ -510,8 +522,16 @@ const confirmPersonSelection = async (personIndex) => {
 };
 
 // 执行全局搜索
-const executeGlobalSearch = async (videoId, personIndex) => {
+const executeGlobalSearch = async (videoId, personIndexOrObject) => {
   try {
+    const personIndex = typeof personIndexOrObject === 'object'
+      ? personIndexOrObject?.person_index
+      : personIndexOrObject
+
+    if (personIndex === undefined || personIndex === null) {
+      throw new Error('人物索引无效')
+    }
+
     console.log(`开始全局搜索: Video ${videoId}, Person ${personIndex}`);
     
     const response = await fetch('/api/global_trajectory', {
@@ -1416,10 +1436,40 @@ onMounted(async () => {
         border-radius: 4px;
         cursor: pointer;
         transition: all 0.3s;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
 
         &:hover {
           background-color: #00ffff;
           color: #001529;
+        }
+
+        .person-thumb {
+          width: 72px;
+          height: 96px;
+          object-fit: cover;
+          border-radius: 3px;
+          border: 1px solid rgba(0, 255, 255, 0.4);
+          background: #0b1f2d;
+        }
+
+        .person-thumb-placeholder {
+          width: 72px;
+          height: 96px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          border-radius: 3px;
+          border: 1px dashed rgba(0, 255, 255, 0.5);
+          color: rgba(255, 255, 255, 0.7);
+        }
+
+        .person-label {
+          font-size: 12px;
+          line-height: 1.2;
         }
       }
 

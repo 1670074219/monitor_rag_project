@@ -98,8 +98,10 @@ class NearestNeighborDistanceMetric(object):
     def __init__(self, metric, matching_threshold, budget=None):
         if metric == "euclidean":
             self._metric = _nn_euclidean_distance
+            self.metric_type = "euclidean"
         elif metric == "cosine":
             self._metric = _nn_cosine_distance
+            self.metric_type = "cosine"
         else:
             raise ValueError(
                 "Invalid metric; must be either 'euclidean' or 'cosine'")
@@ -146,16 +148,34 @@ class NearestNeighborDistanceMetric(object):
             and `targets[j]`.
 
         """
-        cost_matrix = np.zeros((len(features), len(targets)))
-        for i, feat in enumerate(features):
-            for j, target in enumerate(targets):
-                if target in self.samples and len(self.samples[target]) > 0:
-                    gallery_features = np.array(self.samples[target])
-                    query_feature = np.array([feat])
-                    distances = self._metric(gallery_features, query_feature)
-                    cost_matrix[i, j] = np.min(distances)
-                else:
-                    cost_matrix[i, j] = float('inf')
+        features = np.asarray(features, dtype=np.float32)
+        if features.ndim == 1 and features.size > 0:
+            features = features.reshape(1, -1)
+
+        num_targets = len(targets)
+        num_features = len(features)
+
+        if num_targets == 0 or num_features == 0:
+            return np.zeros((num_targets, num_features), dtype=np.float32)
+
+        cost_matrix = np.full((num_targets, num_features), np.inf, dtype=np.float32)
+
+        for row, target in enumerate(targets):
+            samples = self.samples.get(target)
+            if not samples:
+                continue
+
+            gallery_features = np.asarray(samples, dtype=np.float32)
+            if gallery_features.ndim == 1:
+                gallery_features = gallery_features.reshape(1, -1)
+
+            if self.metric_type == "euclidean":
+                distances = _pdist(gallery_features, features)
+            else:
+                distances = _cosine_distance(gallery_features, features)
+
+            cost_matrix[row, :] = distances.min(axis=0)
+
         return cost_matrix
 
     def _metric(self, gallery, query):

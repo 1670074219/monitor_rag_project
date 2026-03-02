@@ -6,9 +6,24 @@ import os
 import re
 import pymysql
 import gc
+import sys
 from PIL import Image
 import torchvision.transforms as T
 from ultralytics import YOLO
+from datetime import datetime
+
+# -----------------------------------------------------------
+# 📌 运行路径兼容：确保可导入 video_process 下的本地包（如 deepsort）
+# -----------------------------------------------------------
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+VIDEO_PROCESS_ROOT = os.path.dirname(CURRENT_DIR)
+if VIDEO_PROCESS_ROOT not in sys.path:
+    sys.path.insert(0, VIDEO_PROCESS_ROOT)
+
+try:
+    from elasticsearch import Elasticsearch
+except ImportError:
+    Elasticsearch = None
 
 # -----------------------------------------------------------
 # 📦 引入 Torchreid (你的代码部分)
@@ -32,13 +47,19 @@ DB_CONFIG = {
 # ================= 路径配置 =================
 CAMERA_CONFIG_PATH = './camera_config.json'
 # 优先使用更强的 YOLOv11x 模型以减少误检
-YOLO_MODEL_PATH = '../yolo11x.pt' 
+YOLO_MODEL_PATH = './yolo/yolo11x.pt' 
 DEEPSORT_CHECKPOINT = './deepsort/deep/checkpoint/ckpt.t7' # 仅用于追踪
 
 # ReID 模型配置 (你提供的)
 REID_MODEL_PATH = './osnet_ain_x1_0_msmt17_256x128_amsgrad_ep50_lr0.0015_coslr_b64_fb10_softmax_labsmth_flip_jitter.pth'
 REID_MODEL_NAME = 'osnet_ain_x1_0'
 REID_NUM_CLASSES = 4101
+
+# ================= Elasticsearch 配置 =================
+ES_CONFIG = {
+    'host': os.getenv('ES_HOST', 'http://219.216.99.30:9200'),
+    'index': os.getenv('REID_ES_INDEX', 'video_reid_index')
+}
 
 # ===========================================================
 # 🧠 类 1: 专门负责提取高质量特征 (封装你的 Torchreid 代码)
@@ -109,6 +130,12 @@ class VideoProcessor:
         self.db_config = DB_CONFIG
         self.camera_configs = self.load_camera_config()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        # ================= 图片落盘目录初始化 =================
+        # ⭐【新增】用于保存每个行人的“最佳质量原图”
+        self.person_crops_root = os.path.normpath('./person_crops')
+        os.makedirs(self.person_crops_root, exist_ok=True)
+        print(f"🖼️ 行人裁剪图保存目录: {self.person_crops_root}")
         
         # 1. 加载 YOLO (用于检测人)
         print(f"🚀 加载 YOLO ({self.device})...")
@@ -137,8 +164,90 @@ class VideoProcessor:
             REID_MODEL_NAME, REID_NUM_CLASSES, REID_MODEL_PATH, self.device
         )
 
+        # 4. 初始化 Elasticsearch（用于 ReID 向量检索）
+        self.es_client = self.init_es_client()
+        if self.es_client:
+            self.ensure_reid_index()
+
     def get_connection(self):
         return pymysql.connect(**self.db_config, cursorclass=pymysql.cursors.DictCursor)
+
+    def init_es_client(self):
+        if Elasticsearch is None:
+            print("⚠️ 未安装 elasticsearch 包，跳过 ES 双写")
+            return None
+
+        try:
+            client = Elasticsearch(
+                [ES_CONFIG['host']],
+                request_timeout=30
+            )
+            client.info()
+            print(f"✅ Elasticsearch 连接成功: {ES_CONFIG['host']}")
+            return client
+        except Exception:
+            try:
+                client = Elasticsearch(
+                    [ES_CONFIG['host']],
+                    request_timeout=30,
+                    headers={
+                        'Accept': 'application/vnd.elasticsearch+json; compatible-with=8',
+                        'Content-Type': 'application/vnd.elasticsearch+json; compatible-with=8'
+                    }
+                )
+                client.info()
+                print(f"✅ Elasticsearch 连接成功(ES8兼容模式): {ES_CONFIG['host']}")
+                return client
+            except Exception as e:
+                print(f"⚠️ Elasticsearch 不可用，继续仅写 MySQL: {e}")
+                return None
+
+    def ensure_reid_index(self):
+        if not self.es_client:
+            return
+
+        index_name = ES_CONFIG['index']
+        try:
+            if self.es_client.indices.exists(index=index_name):
+                print(f"ℹ️ ES 索引已存在: {index_name}")
+                return
+
+            mapping = {
+                'mappings': {
+                    'properties': {
+                        'video_id': {'type': 'integer'},
+                        'person_index': {'type': 'integer'},
+                        'track_id': {'type': 'integer'},
+                        'embedding': {
+                            'type': 'dense_vector',
+                            'dims': 512,
+                            'index': True,
+                            'similarity': 'cosine'
+                        },
+                        'created_at': {'type': 'date'}
+                    }
+                }
+            }
+            self.es_client.indices.create(index=index_name, body=mapping)
+            print(f"✅ 已创建 ES 索引: {index_name}")
+        except Exception as e:
+            print(f"⚠️ 创建 ES 索引失败: {e}")
+
+    def save_to_es(self, docs):
+        if not self.es_client or not docs:
+            return
+
+        ok_count = 0
+        for doc in docs:
+            try:
+                doc_id = f"{doc['video_id']}_{doc['person_index']}"
+                self.es_client.index(index=ES_CONFIG['index'], id=doc_id, document=doc)
+                ok_count += 1
+            except Exception as e:
+                print(f"  ⚠️ ES 写入失败 (video_id={doc.get('video_id')}, person_index={doc.get('person_index')}): {e}")
+
+        if ok_count > 0:
+            print(f"  ✅ ES 写入成功: {ok_count} 条")
 
     def load_camera_config(self):
         try:
@@ -216,17 +325,19 @@ class VideoProcessor:
 
         cap = cv2.VideoCapture(video_path)
         frame_count = 0
-        
-        # 数据结构: { track_id: {'traj': [], 'feats': []} }
+    
+        # 数据结构: { track_id: {'traj': [], 'feats': [], 'all_crops': [], 'best_crop': None} }
         tracks_data = {}
 
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret: break
+            if not ret:
+                break
             frame_count += 1
             
             # 每 5 帧处理一次
-            if frame_count % 5 != 0: continue
+            if frame_count % 5 != 0:
+                continue
 
             # 1. YOLO 检测
             img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -235,16 +346,16 @@ class VideoProcessor:
             detections = []
             if results[0].boxes:
                 for box in results[0].boxes:
-                    # 类别 0 是人，置信度 > 0.45
-                    if int(box.cls) == 0 and box.conf > 0.45:
+                    # 类别 0 是人，置信度 > 0.65（进一步收紧门槛）
+                    if int(box.cls) == 0 and box.conf > 0.65:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         
                         # 几何形状过滤 (宽高比)
                         w_box = x2 - x1
                         h_box = y2 - y1
-                        # 过滤掉太小的物体 (例如高度小于 50 像素) 
-                        # 或 宽高比异常的物体 (人应该是瘦高的，宽度不应超过高度的 80%)
-                        if h_box < 50 or w_box > h_box * 0.8: 
+                        # ⭐【新增-形态学拦截】过滤极小目标与方正目标（如巡检机器人）
+                        # 1) 高度 < 80 直接过滤；2) 人体宽度通常不超过高度 65%
+                        if h_box < 80 or w_box > h_box * 0.65:
                             continue
                             
                         detections.append([x1, y1, x2, y2, box.conf.item()])
@@ -270,7 +381,7 @@ class VideoProcessor:
                 
                 tid = track.track_id
                 if tid not in tracks_data:
-                    tracks_data[tid] = {'traj': [], 'feats': [], 'max_score': 0}
+                    tracks_data[tid] = {'traj': [], 'feats': [], 'all_crops': [], 'best_crop': None}
 
                 # --- A. 提取轨迹 ---
                 bbox = track.to_tlbr() # [x1, y1, x2, y2]
@@ -280,56 +391,87 @@ class VideoProcessor:
                 x2, y2 = min(w, int(bbox[2])), min(h, int(bbox[3]))
 
                 foot_x, foot_y = int((x1 + x2) / 2), y2
-                real_pt = self.pixel_to_world((foot_x, foot_y), H)
-                if real_pt:
-                    tracks_data[tid]['traj'].append([round(real_pt[0], 2), round(real_pt[1], 2)])
+
+                # ⭐【关键修复1】H 缺失时不再静默跳过：降级写入像素坐标，确保轨迹不为空
+                if H is not None:
+                    real_pt = self.pixel_to_world((foot_x, foot_y), H)
+                    if real_pt:
+                        tracks_data[tid]['traj'].append([round(real_pt[0], 2), round(real_pt[1], 2)])
+                    else:
+                        # 这里保持原算法语义：H 存在但该点投影失败时仍不写入（可避免错误映射）
+                        pass
+                else:
+                    tracks_data[tid]['traj'].append([float(foot_x), float(foot_y)])
 
                 # --- B. 提取高质量 ReID 特征 (你的核心需求) ---
                 # 只在当前帧成功匹配了检测框时 (time_since_update == 0) 才进行特征提取
                 if track.time_since_update == 0 and x2 > x1 and y2 > y1:
-                    crop_img = frame[y1:y2, x1:x2].copy() # 使用 .copy() 防止内存引用问题
-                    
-                    # 1. 计算面积
-                    area = (x2 - x1) * (y2 - y1)
-                    
-                    # 2. 计算清晰度 (拉普拉斯方差)
-                    gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-                    clarity = cv2.Laplacian(gray, cv2.CV_64F).var()
-                    
-                    # 3. 综合评分
-                    current_score = area * clarity
-                    
-                    # 策略修改：只保留综合评分最大的一帧特征
-                    if current_score > tracks_data[tid]['max_score']:
-                        # 调用你的 Torchreid 模型提取特征
-                        feature_vec = self.reid_extractor.extract(crop_img)
-                        
-                        if feature_vec:
-                            tracks_data[tid]['max_score'] = current_score
-                            tracks_data[tid]['feats'] = [feature_vec] # 覆盖旧特征，只留最好的
+                    # ⭐【重构】循环内仅收集轨迹帧截图，不做任何评分与特征提取
+                    tracks_data[tid]['all_crops'].append(frame[y1:y2, x1:x2].copy())
 
         cap.release()
+
+        # ⭐【核心逻辑】视频处理结束后，统一提取每条轨迹的 1/3 帧特征
+        for tid, data in tracks_data.items():
+            all_crops = data.get('all_crops', [])
+            if not all_crops:
+                continue
+
+            one_third_idx = len(all_crops) // 3
+            selected_crop = all_crops[one_third_idx]
+
+            feature_vec = self.reid_extractor.extract(selected_crop)
+            if feature_vec:
+                data['feats'] = [feature_vec]
+                data['best_crop'] = selected_crop
+
+            # ⭐【内存释放】中间帧提取完成后清空缓存列表
+            data['all_crops'] = []
+
         return tracks_data
 
     def save_results(self, video_id, results):
         if not results:
+            print(f"⚠️ Video ID {video_id}: analyze_video 返回空结果，未写入数据库")
             return
 
         print(f"💾 正在保存结果到数据库 (Video ID: {video_id})...")
         
-        # 按 ID 排序
         sorted_ids = sorted(results.keys())
         insert_list = []
+        es_docs = []
+
+        # ⭐【新增】为每个视频创建独立子目录，保存最佳质量行人原图
+        video_crop_dir = os.path.join(self.person_crops_root, f"video_{video_id}")
+        os.makedirs(video_crop_dir, exist_ok=True)
+
+        # ⭐【关键新增】先打印总追踪数，便于定位筛选损耗
+        print(f"📊 分析完成，共追踪到 {len(sorted_ids)} 个临时ID，正在筛选...")
 
         for idx, tid in enumerate(sorted_ids):
             data = results[tid]
             traj = data['traj']
             feats = data['feats']
 
-            if not traj: continue
+            # ⭐【关键新增】打破静默失败：轨迹为空
+            if not traj:
+                print(f"  ⚠️ ID {tid} 被过滤: 轨迹为空")
+                data['best_crop'] = None
+                continue
 
-            # 过滤掉轨迹过短的“幽灵” ID
-            if len(traj) < 10:
+            # ⭐【门槛提升】轨迹至少 6 点（每5帧抽帧约 1.2 秒）
+            if len(traj) < 6:
+                print(f"  ⚠️ ID {tid} 被过滤: 轨迹太短 (len={len(traj)} < 6)")
+                data['best_crop'] = None
+                continue
+
+            # ⭐【核心新增】静止目标过滤：首末点位移过小视为背景误检
+            start_pt = traj[0]
+            end_pt = traj[-1]
+            motion_dist = float(np.hypot(end_pt[0] - start_pt[0], end_pt[1] - start_pt[1]))
+            if motion_dist < 30.0:
+                print(f"  ⚠️ ID {tid} 被过滤: 目标几乎静止 (motion_dist={motion_dist:.2f} < 30.0)")
+                data['best_crop'] = None
                 continue
 
             # 获取最佳特征向量
@@ -338,6 +480,26 @@ class VideoProcessor:
                 # 因为现在 feats 只包含一个最佳特征，直接取第一个即可
                 final_vector = feats[0]
             else:
+                # ⭐【关键新增】打破静默失败：未提取到特征
+                print(f"  ⚠️ ID {tid} 被过滤: 未提取到特征")
+                data['best_crop'] = None
+                continue
+
+            # ⭐【新增】获取“最高分特征对应”的最佳裁剪图
+            best_crop = data.get('best_crop')
+            if best_crop is None:
+                print(f"  ⚠️ ID {tid} 被过滤: 缺少最佳原图裁剪")
+                continue
+
+            # ⭐【新增】写入图片到磁盘，并记录相对路径到数据库
+            img_filename = f"person_{idx + 1}_track_{int(tid)}.jpg"
+            abs_img_path = os.path.join(video_crop_dir, img_filename)
+            rel_img_path = os.path.join(f"video_{video_id}", img_filename).replace('\\\\', '/')
+
+            ok = cv2.imwrite(abs_img_path, best_crop)
+            if not ok:
+                print(f"  ⚠️ ID {tid} 被过滤: 图片保存失败 -> {abs_img_path}")
+                data['best_crop'] = None
                 continue
 
             traj_json = {
@@ -351,22 +513,42 @@ class VideoProcessor:
                 video_id,
                 json.dumps(final_vector),
                 idx + 1,
-                json.dumps(traj_json)
+                json.dumps(traj_json),
+                rel_img_path
             ))
+
+            # ⭐【新增】图片落盘后及时释放内存，避免长视频/多目标导致内存膨胀
+            data['best_crop'] = None
+
+            if len(final_vector) == 512:
+                es_docs.append({
+                    'video_id': int(video_id),
+                    'person_index': int(idx + 1),
+                    'track_id': int(tid),
+                    'embedding': final_vector,
+                    'created_at': datetime.utcnow().isoformat()
+                })
+            else:
+                # ⭐【关键新增】补充维度异常诊断
+                print(f"  ⚠️ ID {tid} 被过滤: 向量维度异常 {len(final_vector)} (期望 512)")
 
         if insert_list:
             conn = self.get_connection()
             try:
                 with conn.cursor() as cursor:
-                    sql = "INSERT INTO video_vectors (video_id, vector_data, person_index, person_trajectory) VALUES (%s, %s, %s, %s)"
+                    sql = "INSERT INTO video_vectors (video_id, vector_data, person_index, person_trajectory, person_image_path) VALUES (%s, %s, %s, %s, %s)"
                     cursor.executemany(sql, insert_list)
                     conn.commit()
                 print(f"  ✅ 保存成功: {len(insert_list)} 个人")
+                self.save_to_es(es_docs)
             except Exception as e:
                 print(f"  ❌ 数据库写入错误: {e}")
                 conn.rollback()
             finally:
                 conn.close()
+        else:
+            # ⭐【关键新增】本轮全部被过滤时给出明确提示
+            print(f"  ⚠️ Video ID {video_id}: 所有临时ID均被过滤，未产生可写入记录")
 
 # -----------------------------------------------------------
 # ▶️ 运行

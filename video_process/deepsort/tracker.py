@@ -103,11 +103,8 @@ class Tracker:
                 features = np.array([dets[i].feature for i in detection_indices])
                 targets = np.array([tracks[i].track_id for i in track_indices])
                 
-                # 注意：distance返回的是(features数量, targets数量)，需要转置为(tracks数量, detections数量)
-                distance_matrix = self.metric.distance(features, targets)
-                
-                # 转置以匹配期望的维度：(track_indices数量, detection_indices数量)
-                cost_matrix = distance_matrix.T
+                # distance 直接返回 (tracks数量, detections数量)
+                cost_matrix = self.metric.distance(features, targets)
                 
                 cost_matrix = linear_assignment.gate_cost_matrix(
                     self.kf, cost_matrix, tracks, dets, track_indices,

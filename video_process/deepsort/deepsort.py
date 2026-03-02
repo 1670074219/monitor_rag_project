@@ -9,6 +9,7 @@ class DeepSort(object):
     def __init__(self, max_dist=0.2, min_confidence=0.3, nms_max_overlap=1.0, max_iou_distance=0.7, max_age=70, n_init=3, nn_budget=100):
         self.min_confidence = min_confidence
         self.nms_max_overlap = nms_max_overlap
+        self.feature_dim = None
 
         # 根据字符串 'cosine' 创建距离度量对象
         metric = nn_matching.NearestNeighborDistanceMetric(
@@ -123,19 +124,27 @@ class DeepSort(object):
                         
             if im_crops:
                 features = feature_extractor(im_crops)
-                # 确保返回的特征是 numpy 数组
-                if isinstance(features, torch.Tensor):
-                    features = features.cpu().numpy()
+                features = np.asarray(features, dtype=np.float32)
+                if features.ndim == 1 and features.size > 0:
+                    features = features.reshape(1, -1)
+
+                if features.ndim != 2 or features.shape[0] == 0:
+                    dim = self.feature_dim if self.feature_dim is not None else 0
+                    return np.zeros((len(bbox_xywh), dim), dtype=np.float32)
+
+                self.feature_dim = features.shape[1]
                     
                 # 创建完整的特征数组，无效位置填充零
-                full_features = np.zeros((len(bbox_xywh), features.shape[1]))
+                full_features = np.zeros((len(bbox_xywh), self.feature_dim), dtype=np.float32)
                 for i, valid_idx in enumerate(valid_indices):
                     full_features[valid_idx] = features[i]
                     
                 return full_features
             else:
                 # 返回与输入数量匹配的零特征
-                return np.zeros((len(bbox_xywh), 512))  # 假设特征维度是512
+                dim = self.feature_dim if self.feature_dim is not None else 0
+                return np.zeros((len(bbox_xywh), dim), dtype=np.float32)
         except Exception as e:
             # 返回与输入数量匹配的零特征
-            return np.zeros((len(bbox_xywh), 512)) 
+            dim = self.feature_dim if self.feature_dim is not None else 0
+            return np.zeros((len(bbox_xywh), dim), dtype=np.float32)

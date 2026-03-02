@@ -192,11 +192,9 @@ def gate_cost_matrix(
                 # 长度不匹配时，将整行设为高成本
                 cost_matrix[row, :] = gated_cost
                 continue
-                
-            # 逐个设置成本矩阵
-            for col, dist in enumerate(gating_distance):
-                if dist > gating_threshold:
-                    cost_matrix[row, col] = gated_cost
+
+            # 向量化设置超过门限的成本
+            cost_matrix[row, gating_distance > gating_threshold] = gated_cost
                     
         except Exception as e:
             # 如果出错，将整行设为高成本

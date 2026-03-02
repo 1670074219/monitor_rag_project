@@ -29,6 +29,7 @@ const trajectoryLines = shallowRef([])
 const currentTrajectoryEventId = ref(null)
 const globalTrajectoryLines = shallowRef([])
 const isGlobalTrajectoryMode = ref(false)
+const trajectoryImagePathMap = shallowRef({})
 
 // Store floorplan dimensions for coordinate conversion
 const floorplanImageWidth = ref(0)
@@ -335,7 +336,12 @@ const showEventTrajectory = async (eventId) => {
 
     // 创建每条轨迹的线条
     const createdLines = []
+    const imagePathMap = {}
     for (const trajectory of trajectoryData.trajectories) {
+      if (trajectory.person_image_path) {
+        imagePathMap[trajectory.track_id] = trajectory.person_image_path
+      }
+
       const line = createTrajectoryLine(
         trajectory.coordinates,
         trajectory.color,
@@ -349,7 +355,12 @@ const showEventTrajectory = async (eventId) => {
     }
 
     trajectoryLines.value = createdLines
+    trajectoryImagePathMap.value = imagePathMap
     currentTrajectoryEventId.value = eventId
+
+    if (Object.keys(imagePathMap).length > 0) {
+      console.log('轨迹图片路径映射:', imagePathMap)
+    }
 
     console.log(`成功显示 ${createdLines.length} 条轨迹线条`)
     return true
@@ -383,6 +394,7 @@ const clearTrajectories = () => {
   })
   
   trajectoryLines.value = []
+  trajectoryImagePathMap.value = {}
   currentTrajectoryEventId.value = null
   console.log('已清除所有轨迹线条')
 }
@@ -895,7 +907,8 @@ defineExpose({
   hideGlobalTrajectory,
   loadFloorPlan,
   currentTrajectoryEventId,
-  isGlobalTrajectoryMode
+  isGlobalTrajectoryMode,
+  trajectoryImagePathMap
 })
 </script>
 
