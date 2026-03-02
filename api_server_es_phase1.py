@@ -15,7 +15,7 @@ from mysql.connector import Error
 import cv2
 import time
 
-from video_process.dataset_process.elasticsearch_worker import ElasticSearchWorker
+from video_process.log_feature_extra.elasticsearch_worker import ElasticSearchWorker
 from video_process.person_search.person_search_engine import PersonSearchEngine
 
 # Force FFmpeg to use TCP for RTSP to improve stability and avoid UDP packet loss/timeouts

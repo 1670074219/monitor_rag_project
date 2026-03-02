@@ -51,21 +51,21 @@ class VideoCaptureServerFFmpeg:
                  no_person_frames_threshold: int = 30,
                  pre_record_seconds: float = 2.0,
                  post_record_seconds: float = 2.0,
-                 video_queue: Queue = None,
-                 video_description_path: str = None):
+                 video_queue: Queue = None):
         self.camera_config = camera_config
-        self.yolo_path = yolo_path
-        self.saved_video_path = saved_video_path
+        self.yolo_path = os.path.abspath(yolo_path)
+        self.saved_video_path = os.path.abspath(saved_video_path)
         os.makedirs(self.saved_video_path, exist_ok=True)
-        
+
+        if not os.path.exists(self.yolo_path):
+            raise FileNotFoundError(f"YOLO模型不存在: {self.yolo_path}")
+
         self.yolo_model = YOLO(self.yolo_path).to(device="cuda:2")
         self.people_detected_frames_threshold = people_detected_frames_threshold
         self.no_person_frames_threshold = no_person_frames_threshold
         self.pre_record_seconds = pre_record_seconds
         self.post_record_seconds = post_record_seconds
         self.video_queue = video_queue
-        self.video_description_path = video_description_path
-        self.json_lock = threading.Lock()
         # 关键参数1：切片时长提升到5秒，尽量对齐GOP关键帧，降低坏片概率
         self.segment_seconds = 5.0
         # 关键参数2：保留窗口适当增加，避免事件拼接时清理过早
@@ -466,7 +466,7 @@ class VideoCaptureServerFFmpeg:
 
             if os.path.exists(output_file) and os.path.getsize(output_file) > 1024:
                 logger.info(f"[{camera_id}] 事件视频生成成功: {output_file}")
-                self.update_video_description(camera_id, output_file)
+                self.persist_video_metadata(camera_id, output_file)
                 return True
 
             logger.warning(f"[{camera_id}] 拼接输出无效: {output_file}")
@@ -574,42 +574,22 @@ class VideoCaptureServerFFmpeg:
 
         logger.info(f"[{camera_id}] 处理线程结束。")
 
-    def update_video_description(self, camera_id: str, output_file: str):
-        """更新视频描述JSON文件（线程安全）"""
+    def persist_video_metadata(self, camera_id: str, output_file: str):
+        """仅写入数据库并投递队列，不再写入JSON文件"""
         try:
             filename = os.path.basename(output_file)
             timestamp_part = filename.replace(f"{camera_id}_", "").replace(".mp4", "")
-            
-            with self.json_lock:
-                video_data = {}
-                if self.video_description_path and os.path.exists(self.video_description_path):
-                    try:
-                        with open(self.video_description_path, "r", encoding="utf-8") as f:
-                            video_data = json.load(f)
-                    except json.JSONDecodeError:
-                        logger.warning(f"JSON文件损坏: {self.video_description_path}，将创建新文件。")
+            v_k = f"{camera_id}_{timestamp_part}"
 
-                v_k = f"{camera_id}_{timestamp_part}"
-                video_data[v_k] = {
-                    "video_path": output_file,
-                    "analyse_result": None,
-                    "is_embedding": False,
-                    "idx": None
-                }
+            # 仅写数据库
+            self._save_video_to_database(v_k, output_file)
 
-                with open(self.video_description_path, "w", encoding="utf-8") as f:
-                    json.dump(video_data, f, indent=4, ensure_ascii=False)
-                
-                logger.info(f"已更新JSON描述: {v_k}")
-
-                # 同步写入数据库 videos 表（与 JSON 双写，保持兼容）
-                self._save_video_to_database(v_k, output_file)
-        
-                if self.video_queue is not None:
-                    self.video_queue.put(v_k)
-                    logger.info(f"已将 {v_k} 放入视频分析队列。")
+            # 保留队列投递（供后续分析流程消费）
+            if self.video_queue is not None:
+                self.video_queue.put(v_k)
+                logger.info(f"已将 {v_k} 放入视频分析队列。")
         except Exception as e:
-            logger.error(f"更新视频描述失败: {e}")
+            logger.error(f"持久化视频元数据失败: {e}")
 
     def run_all_cameras(self):
         """为每个摄像头启动拉流和处理线程"""
@@ -705,16 +685,24 @@ class VideoCaptureServerFFmpeg:
         logger.info("所有监控已停止。")
 
 if __name__ == "__main__":
-    with open(os.path.join(base_dir, "camera_config.json"), "r") as f:
+    camera_config_path = os.path.abspath(os.path.join(base_dir, '..', 'camera_config.json'))
+    yolo_model_path = os.path.abspath(os.path.join(base_dir, '..', 'models/yolo', 'yolo11s.pt'))
+    saved_video_dir = os.path.abspath(os.path.join(base_dir, '..', 'saved_video'))
+
+    if not os.path.exists(camera_config_path):
+        raise FileNotFoundError(f"camera_config.json不存在: {camera_config_path}")
+    if not os.path.exists(yolo_model_path):
+        raise FileNotFoundError(f"YOLO模型不存在: {yolo_model_path}")
+
+    with open(camera_config_path, "r", encoding="utf-8") as f:
         camera_config = json.load(f)
 
     video_queue = Queue()
     video_capture_server = VideoCaptureServerFFmpeg(
         camera_config["camera_config"],
-        os.path.join(base_dir, "yolo/yolo11s.pt"),
-        os.path.join(base_dir, "saved_video"),
-        video_queue=video_queue,
-        video_description_path=os.path.join(base_dir, "video_description.json")
+        yolo_model_path,
+        saved_video_dir,
+        video_queue=video_queue
     )
 
     # 设置信号处理器以优雅地关闭
