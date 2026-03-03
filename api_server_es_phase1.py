@@ -11,6 +11,10 @@ import re
 from datetime import datetime
 import math
 import random
+import subprocess
+import signal
+import sys
+import atexit
 import mysql.connector
 from mysql.connector import Error
 import cv2
@@ -32,6 +36,9 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 # 摄像头配置路径
 CAMERA_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_process', 'camera_config.json')
+TRACKER_SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_process', 'realtime_stream_tracker.py')
+TRACKING_PUSH_URL = 'http://127.0.0.1:5000/api/tracking/push'
+STREAM_IDLE_TIMEOUT_SECONDS = 30
 
 # 摄像头类
 class Camera:
@@ -40,30 +47,74 @@ class Camera:
         self.rtsp_url = rtsp_url
         self.frame = None
         self.lock = threading.Lock()
-        self.running = True
-        self.thread = threading.Thread(target=self.update, args=())
-        self.thread.daemon = True
-        self.thread.start()
+        self.state_lock = threading.Lock()
+        self.running = False
+        self.thread = None
+        self.cap = None
+        self.active_clients = 0
+        self.last_access_time = time.time()
+        self.idle_timeout = STREAM_IDLE_TIMEOUT_SECONDS
+
+    def _release_capture(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+    def ensure_started(self):
+        with self.state_lock:
+            self.last_access_time = time.time()
+            if self.thread and self.thread.is_alive():
+                return
+            self.running = True
+            self.thread = threading.Thread(target=self.update, daemon=True)
+            self.thread.start()
+            logger.info(f"Lazy start stream thread for {self.camera_id}")
+
+    def acquire_viewer(self):
+        with self.state_lock:
+            self.active_clients += 1
+            self.last_access_time = time.time()
+        self.ensure_started()
+
+    def release_viewer(self):
+        with self.state_lock:
+            if self.active_clients > 0:
+                self.active_clients -= 1
+            self.last_access_time = time.time()
+
+    def touch(self):
+        with self.state_lock:
+            self.last_access_time = time.time()
 
     def update(self):
-        while self.running:
-            # Use CAP_FFMPEG explicitly
-            cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
-            
-            if not cap.isOpened():
-                logger.warning(f"Warning: Could not open video source for {self.camera_id}. Retrying in 5 seconds...")
-                time.sleep(5)
-                continue
-            
-            # Reduce buffer size to minimize latency
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
-            logger.info(f"Successfully connected to {self.camera_id}")
-            
-            while self.running and cap.isOpened():
-                ret, frame = cap.read()
+        try:
+            while True:
+                with self.state_lock:
+                    if not self.running:
+                        break
+
+                    idle_seconds = time.time() - self.last_access_time
+                    if self.active_clients == 0 and idle_seconds > self.idle_timeout:
+                        logger.info(f"Camera {self.camera_id} idle for {idle_seconds:.1f}s, stopping stream thread")
+                        self.running = False
+                        break
+
+                if self.cap is None:
+                    self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+                    if not self.cap.isOpened():
+                        logger.warning(f"Warning: Could not open video source for {self.camera_id}. Retrying in 5 seconds...")
+                        self._release_capture()
+                        time.sleep(5)
+                        continue
+
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    logger.info(f"Successfully connected to {self.camera_id}")
+
+                ret, frame = self.cap.read()
                 if ret:
-                    # Resize to reduce bandwidth/CPU usage (Monitor doesn't need 4K)
                     try:
                         height, width = frame.shape[:2]
                         target_width = 640
@@ -71,20 +122,23 @@ class Camera:
                             scale = target_width / width
                             target_height = int(height * scale)
                             frame = cv2.resize(frame, (target_width, target_height))
-                        
+
                         with self.lock:
                             self.frame = frame
                     except Exception as e:
                         logger.error(f"Error processing frame for {self.camera_id}: {e}")
                 else:
                     logger.warning(f"Lost connection to {self.camera_id}. Reconnecting...")
-                    break
-            
-            cap.release()
-            if self.running:
-                time.sleep(2)
+                    self._release_capture()
+                    time.sleep(1)
+        finally:
+            self._release_capture()
+            with self.state_lock:
+                self.running = False
+                self.thread = None
 
     def get_frame(self):
+        self.touch()
         with self.lock:
             if self.frame is None:
                 return None
@@ -99,14 +153,24 @@ class Camera:
                 return None
 
     def stop(self):
-        self.running = False
-        self.thread.join()
+        with self.state_lock:
+            self.running = False
+            worker = self.thread
+        if worker and worker.is_alive():
+            worker.join(timeout=2)
+        self._release_capture()
 
 # 全局摄像头字典
 cameras = {}
+camera_urls = {}
+camera_registry_lock = threading.Lock()
+
+# AI 子进程管理
+ai_processes = {}
+ai_process_lock = threading.Lock()
 
 def load_cameras():
-    global cameras
+    global camera_urls
     if not os.path.exists(CAMERA_CONFIG_PATH):
         logger.error(f"Config file not found at {CAMERA_CONFIG_PATH}")
         return
@@ -114,16 +178,88 @@ def load_cameras():
     try:
         with open(CAMERA_CONFIG_PATH, 'r') as f:
             config = json.load(f)
-        
+
+        loaded_urls = {}
         for cam_conf in config.get('camera_config', []):
             cam_id = cam_conf['camera_id']
             url = cam_conf['camera_url']
-            if cam_id not in cameras:
-                logger.info(f"Initializing camera {cam_id}...")
-                cameras[cam_id] = Camera(cam_id, url)
-                time.sleep(0.5)
+            loaded_urls[cam_id] = url
+
+        with camera_registry_lock:
+            camera_urls = loaded_urls
+
+        logger.info(f"Loaded {len(camera_urls)} camera configs (lazy mode)")
     except Exception as e:
         logger.error(f"Error loading cameras: {e}")
+
+def get_or_create_camera(camera_id):
+    with camera_registry_lock:
+        if camera_id in cameras:
+            return cameras[camera_id]
+
+        rtsp_url = camera_urls.get(camera_id)
+        if not rtsp_url:
+            return None
+
+        camera = Camera(camera_id, rtsp_url)
+        cameras[camera_id] = camera
+        return camera
+
+def _reap_ai_processes_locked():
+    dead_ids = []
+    for camera_id, proc in ai_processes.items():
+        if proc.poll() is not None:
+            try:
+                proc.wait(timeout=0)
+            except Exception:
+                pass
+            dead_ids.append(camera_id)
+    for camera_id in dead_ids:
+        ai_processes.pop(camera_id, None)
+
+def _stop_ai_process_locked(camera_id, wait_timeout=8):
+    proc = ai_processes.get(camera_id)
+    if not proc:
+        return False, 'not_running'
+
+    if proc.poll() is not None:
+        try:
+            proc.wait(timeout=0)
+        except Exception:
+            pass
+        ai_processes.pop(camera_id, None)
+        return False, 'already_exited'
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=wait_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            proc.kill()
+        proc.wait(timeout=3)
+
+    ai_processes.pop(camera_id, None)
+    return True, 'stopped'
+
+def cleanup_runtime_resources():
+    with ai_process_lock:
+        for camera_id in list(ai_processes.keys()):
+            _stop_ai_process_locked(camera_id)
+
+    with camera_registry_lock:
+        for camera in list(cameras.values()):
+            camera.stop()
+        cameras.clear()
+
+atexit.register(cleanup_runtime_resources)
 
 # 数据库配置
 DB_CONFIG = {
@@ -206,9 +342,9 @@ CAMERA_REGIONS = {
 @app.route('/monitor')
 def monitor():
     """监控页面"""
-    if not cameras:
+    if not camera_urls:
         load_cameras()
-    return render_template('index.html', cameras=list(cameras.keys()))
+    return render_template('index.html', cameras=list(camera_urls.keys()))
 
 @app.route('/api/cameras', methods=['GET'])
 def get_cameras():
@@ -233,16 +369,83 @@ def gen(camera):
         else:
             time.sleep(0.1)
 
-@app.route('/video_feed/<camera_id>')
+@app.route('/video_feed/<camera_id>', methods=['GET', 'OPTIONS'])
 def video_feed(camera_id):
     """视频流路由"""
-    if camera_id not in cameras:
+    if request.method == 'OPTIONS':
+        response = Response(status=204)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = '*'
+        return response
+
+    if not camera_urls:
         load_cameras()
-        if camera_id not in cameras:
-            return "Camera not found", 404
-            
-    return Response(gen(cameras[camera_id]),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+    camera = get_or_create_camera(camera_id)
+    if not camera:
+        return jsonify({'error': f'Camera {camera_id} not found'}), 404
+
+    def stream_generator():
+        camera.acquire_viewer()
+        try:
+            yield from gen(camera)
+        finally:
+            camera.release_viewer()
+
+    response = Response(stream_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = '*'
+    return response
+
+@app.route('/api/ai/start/<camera_id>', methods=['POST'])
+def start_ai_inference(camera_id):
+    """按需启动指定摄像头 AI 推理进程"""
+    if not camera_urls:
+        load_cameras()
+    if camera_id not in camera_urls:
+        return jsonify({'ok': False, 'error': f'camera_id {camera_id} not found in config'}), 404
+
+    with ai_process_lock:
+        _reap_ai_processes_locked()
+        existing = ai_processes.get(camera_id)
+        if existing and existing.poll() is None:
+            return jsonify({'ok': True, 'status': 'already_running', 'camera_id': camera_id, 'pid': existing.pid})
+
+        cmd = [
+            sys.executable,
+            TRACKER_SCRIPT_PATH,
+            '--camera',
+            camera_id,
+            '--api-url',
+            TRACKING_PUSH_URL,
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            cwd=os.path.dirname(TRACKER_SCRIPT_PATH),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        ai_processes[camera_id] = proc
+
+    logger.info(f"Started AI process for {camera_id}, pid={proc.pid}")
+    return jsonify({'ok': True, 'status': 'started', 'camera_id': camera_id, 'pid': proc.pid})
+
+@app.route('/api/ai/stop/<camera_id>', methods=['POST'])
+def stop_ai_inference(camera_id):
+    """停止指定摄像头 AI 推理进程（优雅终止 + 防僵尸回收）"""
+    with ai_process_lock:
+        _reap_ai_processes_locked()
+        stopped, status = _stop_ai_process_locked(camera_id)
+
+    if status == 'not_running':
+        return jsonify({'ok': True, 'status': 'not_running', 'camera_id': camera_id})
+
+    logger.info(f"Stopped AI process for {camera_id}, status={status}")
+    return jsonify({'ok': True, 'status': status, 'camera_id': camera_id, 'stopped': stopped})
 
 def init_servers():
     """初始化服务器"""

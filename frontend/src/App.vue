@@ -17,63 +17,80 @@
     </header>
     <div class="content">
       <div class="left-panel">
-        <div class="date-picker-container">
-          <label for="event-date">选择日期:</label>
-          <input 
-            type="date" 
-            id="event-date" 
-            v-model="selectedDate" 
-          >
-        </div>
-        
+        <template v-if="!isRealTimeTracking">
+          <div class="date-picker-container">
+            <label for="event-date">选择日期:</label>
+            <input 
+              type="date" 
+              id="event-date" 
+              v-model="selectedDate" 
+            >
+          </div>
+          
 
-        
-        <!-- Re-add Event Details Display -->
-        <div v-if="selectedEvent" class="event-details">
-          <h3>事件详情</h3>
-          <div class="event-content">
-            <pre>{{ selectedEvent.content || '(无内容)' }}</pre>
-            <div class="event-actions">
-              <button
-                v-if="selectedEvent.videoFile"
-                @click="playVideo(selectedEvent.videoFile)"
-                class="play-button"
-              >
-                📹 播放视频
-              </button>
-              
-              <button
-                v-if="selectedEvent.has_trajectory"
-                @click="toggleTrajectory(selectedEvent.id)"
-                :class="['trajectory-button', { 'active': currentTrajectoryEventId === selectedEvent.id }]"
-              >
-                {{ currentTrajectoryEventId === selectedEvent.id ? '🛤️ 隐藏轨迹' : '🛤️ 显示轨迹' }}
-              </button>
-              
-              <button
-                v-if="selectedEvent.has_trajectory"
-                @click="showGlobalTrajectory(selectedEvent.id)"
-                :class="['global-trajectory-button', { 'active': isGlobalTrajectoryMode }]"
-                :disabled="isGlobalTrajectoryLoading"
-              >
-                {{ isGlobalTrajectoryLoading ? '🔍 搜索中...' : (isGlobalTrajectoryMode ? '🌐 隐藏全局轨迹' : '🌐 全局轨迹') }}
-              </button>
-              
-              <span v-else-if="!selectedEvent.has_trajectory" class="no-trajectory-hint">
-                此事件无轨迹数据
-              </span>
+          
+          <!-- Re-add Event Details Display -->
+          <div v-if="selectedEvent" class="event-details">
+            <h3>事件详情</h3>
+            <div class="event-content">
+              <pre>{{ selectedEvent.content || '(无内容)' }}</pre>
+              <div class="event-actions">
+                <button
+                  v-if="selectedEvent.videoFile"
+                  @click="playVideo(selectedEvent.videoFile)"
+                  class="play-button"
+                >
+                  📹 播放视频
+                </button>
+                
+                <button
+                  v-if="selectedEvent.has_trajectory"
+                  @click="toggleTrajectory(selectedEvent.id)"
+                  :class="['trajectory-button', { 'active': currentTrajectoryEventId === selectedEvent.id }]"
+                >
+                  {{ currentTrajectoryEventId === selectedEvent.id ? '🛤️ 隐藏轨迹' : '🛤️ 显示轨迹' }}
+                </button>
+                
+                <button
+                  v-if="selectedEvent.has_trajectory"
+                  @click="showGlobalTrajectory(selectedEvent.id)"
+                  :class="['global-trajectory-button', { 'active': isGlobalTrajectoryMode }]"
+                  :disabled="isGlobalTrajectoryLoading"
+                >
+                  {{ isGlobalTrajectoryLoading ? '🔍 搜索中...' : (isGlobalTrajectoryMode ? '🌐 隐藏全局轨迹' : '🌐 全局轨迹') }}
+                </button>
+                
+                <span v-else-if="!selectedEvent.has_trajectory" class="no-trajectory-hint">
+                  此事件无轨迹数据
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-        <div v-else-if="!eventsLoading && events.length === 0 && !initialLoadPending" class="no-logs-message">
-          {{ selectedDate }} 无日志记录
-        </div>
-        <div v-else-if="eventsLoading" class="loading-message">
-          正在加载 {{selectedDate}} 的日志...
-        </div>
-        <div v-else class="no-selection">
-           点击地图标记或选择日期查看详情
-        </div>
+          <div v-else-if="!eventsLoading && events.length === 0 && !initialLoadPending" class="no-logs-message">
+            {{ selectedDate }} 无日志记录
+          </div>
+          <div v-else-if="eventsLoading" class="loading-message">
+            正在加载 {{selectedDate}} 的日志...
+          </div>
+          <div v-else class="no-selection">
+             点击地图标记或选择日期查看详情
+          </div>
+        </template>
+        <template v-else>
+          <div
+            v-for="camId in leftCameras"
+            :key="camId"
+            class="camera-card"
+            @click="toggleCameraLive(camId)"
+          >
+            <img
+              v-if="activeLiveCameras.includes(camId)"
+              :src="getLiveVideoUrl(camId)"
+              class="live-video-stream"
+            />
+            <div v-else class="camera-placeholder">Camera {{ camId }}</div>
+          </div>
+        </template>
       </div>
       <div class="center-area-wrapper">
         <div class="center-panel">
@@ -90,20 +107,37 @@
       </div>
       <!-- Populate Right Panel -->
       <div class="right-panel">
-         <!-- Top Section: Stats Summary -->
-         <div class="right-panel-section right-panel-top">
-            <StatsSummary 
-              :selected-date-total-events="eventsForSelectedDate.length" 
-              :visible-events="visibleEvents"
-              :camera-activity-data="cameraActivityForSelectedDate"
-            />
-         </div>
-         <!-- Bottom Section: Chat -->
-         <div class="right-panel-section right-panel-bottom">
-            <RagChat 
-              @play-video-from-chat="handlePlayVideoFromChat"
-            />
-         </div>
+         <template v-if="!isRealTimeTracking">
+           <!-- Top Section: Stats Summary -->
+           <div class="right-panel-section right-panel-top">
+              <StatsSummary 
+                :selected-date-total-events="eventsForSelectedDate.length" 
+                :visible-events="visibleEvents"
+                :camera-activity-data="cameraActivityForSelectedDate"
+              />
+           </div>
+           <!-- Bottom Section: Chat -->
+           <div class="right-panel-section right-panel-bottom">
+              <RagChat 
+                @play-video-from-chat="handlePlayVideoFromChat"
+              />
+           </div>
+         </template>
+         <template v-else>
+           <div
+             v-for="camId in rightCameras"
+             :key="camId"
+             class="camera-card"
+             @click="toggleCameraLive(camId)"
+           >
+             <img
+               v-if="activeLiveCameras.includes(camId)"
+               :src="getLiveVideoUrl(camId)"
+               class="live-video-stream"
+             />
+             <div v-else class="camera-placeholder">Camera {{ camId }}</div>
+           </div>
+         </template>
       </div>
     </div>
 
@@ -239,9 +273,49 @@ const initialLoadPending = ref(true) // New ref to track if initial load via onF
 const threeDMap = ref(null)
 
 const isRealTimeTracking = ref(false)
+const leftCameras = ['camera1', 'camera2', 'camera3', 'camera4']
+const rightCameras = ['camera5', 'camera6', 'camera7']
+const activeLiveCameras = ref([])
+const aiApiBase = `http://${window.location.hostname}:5029`
 
-const toggleRealTimeTracking = () => {
+const getLiveVideoUrl = (camId) => {
+  return `http://${window.location.hostname}:5029/video_feed/${camId}`
+}
+
+const stopAiForCamera = async (camId) => {
+  try {
+    await fetch(`${aiApiBase}/api/ai/stop/${camId}`, {
+      method: 'POST'
+    })
+  } catch (error) {
+    console.error(`停止 AI 失败: ${camId}`, error)
+  }
+}
+
+const toggleCameraLive = async (camId) => {
+  if (activeLiveCameras.value.includes(camId)) {
+    activeLiveCameras.value = activeLiveCameras.value.filter(id => id !== camId)
+    await stopAiForCamera(camId)
+  } else {
+    try {
+      const response = await fetch(`${aiApiBase}/api/ai/start/${camId}`, {
+        method: 'POST'
+      })
+
+      if (response.ok && !activeLiveCameras.value.includes(camId)) {
+        activeLiveCameras.value.push(camId)
+      } else if (!response.ok) {
+        console.error(`启动 AI 失败: ${camId}, status=${response.status}`)
+      }
+    } catch (error) {
+      console.error(`启动 AI 请求异常: ${camId}`, error)
+    }
+  }
+}
+
+const toggleRealTimeTracking = async () => {
   isRealTimeTracking.value = !isRealTimeTracking.value
+
   if (isRealTimeTracking.value) {
     if (threeDMap.value) {
       threeDMap.value.connectTracking()
@@ -250,6 +324,12 @@ const toggleRealTimeTracking = () => {
     if (threeDMap.value) {
       threeDMap.value.disconnectTracking()
     }
+
+    const camerasToStop = [...activeLiveCameras.value]
+    for (const camId of camerasToStop) {
+      await stopAiForCamera(camId)
+    }
+    activeLiveCameras.value = []
   }
 }
 
@@ -1367,6 +1447,55 @@ onMounted(async () => {
            border-top: 1px solid rgba(0, 255, 255, 0.1);
            padding-top: 15px;
        }
+  }
+
+  .camera-card {
+    flex: 1;
+    background: rgba(0, 255, 255, 0.05);
+    border: 1px solid rgba(0, 255, 255, 0.3);
+    border-radius: 8px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.3s ease;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    
+    &:last-child {
+      margin-bottom: 0;
+    }
+    
+    &:hover {
+      background: rgba(0, 255, 255, 0.15);
+      border-color: #00ffff;
+      transform: scale(1.02);
+      box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+      z-index: 10;
+    }
+
+    .camera-placeholder {
+      color: #00ffff;
+      font-size: 1.2em;
+      font-weight: bold;
+      text-shadow: 0 0 5px rgba(0, 255, 255, 0.5);
+      pointer-events: none;
+    }
+
+    .live-video-stream {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      animation: fadeIn 0.5s ease-in-out;
+    }
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
 
   .video-modal {
