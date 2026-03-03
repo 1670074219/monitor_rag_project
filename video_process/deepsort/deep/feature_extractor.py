@@ -2,6 +2,7 @@ import torch
 import torchvision.transforms as transforms
 import numpy as np
 import cv2
+import warnings
 
 from .model import Net
 
@@ -10,7 +11,22 @@ class Extractor(object):
     def __init__(self, model_path, use_cuda=True):
         self.net = Net(reid=True)
         self.device = "cuda" if torch.cuda.is_available() and use_cuda else "cpu"
-        state_dict = torch.load(model_path, map_location=torch.device(self.device))['net_dict']
+        try:
+            ckpt = torch.load(
+                model_path,
+                map_location=torch.device(self.device),
+                weights_only=True,
+            )
+        except TypeError:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="You are using `torch.load` with `weights_only=False`",
+                    category=FutureWarning,
+                )
+                ckpt = torch.load(model_path, map_location=torch.device(self.device))
+
+        state_dict = ckpt['net_dict']
         self.net.load_state_dict(state_dict)
         
         self.net.to(self.device)

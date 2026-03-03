@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>楼层沙盘实时监控</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+    }
+
+    #sandbox {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    .status {
+      position: fixed;
+      left: 16px;
+      top: 12px;
+      z-index: 10;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.45);
+      user-select: none;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="status" class="status">状态：初始化中...</div>
+  <canvas id="sandbox"></canvas>
+
+  <script>
+    const canvas = document.getElementById('sandbox');
+    const ctx = canvas.getContext('2d');
+    const statusEl = document.getElementById('status');
+
+    const floorplanImage = new Image();
+    floorplanImage.src = '/static/floorplan.png';
+
+    const TRACK_TIMEOUT_MS = 3000;
+    const MAX_TRAIL_POINTS = 60;
+    const DOT_RADIUS = 6;
+
+    let ws = null;
+    let rafId = null;
+    let heartbeatTimer = null;
+
+    /**
+     * activeTracks：核心实时数据结构（字典）
+     * key: track_id（数字）
+     * value:
+     * {
+     *   x, y,                 // 最新坐标
+     *   history: [[x,y],...], // 历史轨迹点，越靠后越新
+     *   color,                // 该目标专属颜色
+     *   lastSeenAt            // 最近一次收到更新的时间戳（毫秒）
+     * }
+     */
+    const activeTracks = new Map();
+
+    /**
+     * 背景图绘制变换参数：用于把“楼层图原始坐标”映射到当前 Canvas。
+     * 采用 contain 模式，保证底图完整显示，不被拉伸。
+     */
+    const imageTransform = {
+      drawX: 0,
+      drawY: 0,
+      drawW: 1,
+      drawH: 1,
+      imgW: 1,
+      imgH: 1,
+    };
+
+    function setStatus(text) {
+      statusEl.textContent = `状态：${text}`;
+    }
+
+    /**
+     * Canvas 分辨率与窗口同步。
+     * 使用 devicePixelRatio 提高清晰度，避免大屏锯齿。
+     */
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const cssWidth = window.innerWidth;
+      const cssHeight = window.innerHeight;
+
+      canvas.width = Math.floor(cssWidth * dpr);
+      canvas.height = Math.floor(cssHeight * dpr);
+      canvas.style.width = `${cssWidth}px`;
+      canvas.style.height = `${cssHeight}px`;
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      computeContainTransform(cssWidth, cssHeight);
+    }
+
+    function computeContainTransform(canvasCssWidth, canvasCssHeight) {
+      const iw = floorplanImage.naturalWidth || 1;
+      const ih = floorplanImage.naturalHeight || 1;
+      const scale = Math.min(canvasCssWidth / iw, canvasCssHeight / ih);
+
+      imageTransform.drawW = iw * scale;
+      imageTransform.drawH = ih * scale;
+      imageTransform.drawX = (canvasCssWidth - imageTransform.drawW) / 2;
+      imageTransform.drawY = (canvasCssHeight - imageTransform.drawH) / 2;
+      imageTransform.imgW = iw;
+      imageTransform.imgH = ih;
+    }
+
+    /**
+     * 将后端给出的 (x,y) 映射到当前 Canvas。
+     * 假设后端坐标是基于 floorplan.jpg 原图像素坐标系。
+     */
+    function mapPointToCanvas(px, py) {
+      const { drawX, drawY, drawW, drawH, imgW, imgH } = imageTransform;
+      return {
+        x: drawX + (px / imgW) * drawW,
+        y: drawY + (py / imgH) * drawH,
+      };
+    }
+
+    function colorByTrackId(trackId) {
+      const hue = (trackId * 67) % 360;
+      return `hsl(${hue}, 85%, 52%)`;
+    }
+
+    /**
+     * 超时清理（关键逻辑）：
+     * 若目标 3 秒内没有收到新坐标，直接从 activeTracks 中删除。
+     */
+    function cleanupExpiredTracks(nowTs) {
+      activeTracks.forEach((track, trackId) => {
+        if (nowTs - track.lastSeenAt > TRACK_TIMEOUT_MS) {
+          activeTracks.delete(trackId);
+        }
+      });
+    }
+
+    function drawBackground() {
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+      if (!floorplanImage.complete || floorplanImage.naturalWidth === 0) {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+        return;
+      }
+
+      ctx.drawImage(
+        floorplanImage,
+        imageTransform.drawX,
+        imageTransform.drawY,
+        imageTransform.drawW,
+        imageTransform.drawH
+      );
+    }
+
+    /**
+     * 绘制单个目标轨迹：
+     * - 历史线段采用“从旧到新逐段增强透明度”的方式，形成渐变尾迹效果。
+     * - 最新点用实心圆突出。
+     */
+    function drawSingleTrack(track) {
+      const { history, color, x, y } = track;
+
+      if (history.length > 1) {
+        for (let i = 1; i < history.length; i += 1) {
+          const prev = mapPointToCanvas(history[i - 1][0], history[i - 1][1]);
+          const curr = mapPointToCanvas(history[i][0], history[i][1]);
+          const alpha = i / history.length;
+
+          ctx.beginPath();
+          ctx.moveTo(prev.x, prev.y);
+          ctx.lineTo(curr.x, curr.y);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = Math.max(0.12, alpha * 0.9);
+          ctx.stroke();
+        }
+      }
+
+      const latestPoint = mapPointToCanvas(x, y);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(latestPoint.x, latestPoint.y, DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function renderFrame() {
+      const nowTs = Date.now();
+      cleanupExpiredTracks(nowTs);
+
+      drawBackground();
+
+      activeTracks.forEach((track) => {
+        drawSingleTrack(track);
+      });
+
+      ctx.globalAlpha = 1;
+      rafId = requestAnimationFrame(renderFrame);
+    }
+
+    /**
+     * 建立 WebSocket：
+     * 1) 按需求固定连接 ws://localhost:8000/ws/tracking
+     * 2) 接收 JSON: {"track_id": 1, "x": 120, "y": 300}
+     * 3) 更新 activeTracks，并维护每个目标的历史轨迹
+     */
+    function connectWebSocket() {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+
+      ws = new WebSocket('ws://localhost:8000/ws/tracking');
+
+      ws.onopen = () => {
+        setStatus('WebSocket 已连接，正在接收实时坐标');
+      };
+
+      ws.onmessage = (event) => {
+        let payload;
+        try {
+          payload = JSON.parse(event.data);
+        } catch (error) {
+          return;
+        }
+
+        const trackId = Number(payload.track_id);
+        const x = Number(payload.x);
+        const y = Number(payload.y);
+
+        if (!Number.isFinite(trackId) || !Number.isFinite(x) || !Number.isFinite(y)) {
+          return;
+        }
+
+        const existing = activeTracks.get(trackId);
+        const history = existing ? existing.history.slice() : [];
+        history.push([x, y]);
+
+        if (history.length > MAX_TRAIL_POINTS) {
+          history.shift();
+        }
+
+        activeTracks.set(trackId, {
+          x,
+          y,
+          history,
+          color: existing ? existing.color : colorByTrackId(trackId),
+          lastSeenAt: Date.now(),
+        });
+      };
+
+      ws.onclose = () => {
+        setStatus('连接断开，3 秒后重连');
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = () => {
+        setStatus('连接异常，等待重连');
+      };
+
+      /**
+       * 心跳包：
+       * 后端已改为 receive_text 阻塞保活，这里定时发送轻量字符串，避免连接长期静默。
+       */
+      heartbeatTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send('ping');
+        }
+      }, 20000);
+    }
+
+    function init() {
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+
+      floorplanImage.onload = () => {
+        resizeCanvas();
+        setStatus('底图加载完成，等待实时数据');
+      };
+
+      floorplanImage.onerror = () => {
+        setStatus('floorplan.jpg 加载失败，请检查 /static/floorplan.jpg');
+      };
+
+      connectWebSocket();
+      renderFrame();
+    }
+
+    init();
+
+    window.addEventListener('beforeunload', () => {
+      if (rafId) {
+        cancelAnimationFrame(rafId);
+      }
+      if (ws) {
+        ws.close();
+      }
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+    });
+  </script>
+</body>
+</html>

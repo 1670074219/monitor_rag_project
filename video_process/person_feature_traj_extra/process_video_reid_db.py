@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import torch
+import requests
 import json
 import os
 import re
@@ -397,6 +398,18 @@ class VideoProcessor:
                     real_pt = self.pixel_to_world((foot_x, foot_y), H)
                     if real_pt:
                         tracks_data[tid]['traj'].append([round(real_pt[0], 2), round(real_pt[1], 2)])
+                        # ⭐ 实时推送：将当前追踪点立即发送给 FastAPI（用于前端 WebSocket 实时渲染）
+                        payload = {
+                            "track_id": int(tid),
+                            "x": float(real_pt[0]),
+                            "y": float(real_pt[1])
+                        }
+                        try:
+                            # ⭐ 极短超时，确保网络异常不阻塞视频推理主线程
+                            requests.post("http://127.0.0.1:8000/api/tracking/push", json=payload, timeout=0.05)
+                        except Exception:
+                            # ⭐ 后端未启动/超时/网络异常时直接忽略，不影响主流程
+                            pass
                     else:
                         # 这里保持原算法语义：H 存在但该点投影失败时仍不写入（可避免错误映射）
                         pass
