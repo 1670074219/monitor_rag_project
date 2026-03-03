@@ -3,9 +3,17 @@
     <header class="header">
       <h1>智慧监控数据可视化展示</h1>
        <!-- Monitor Button -->
-       <button @click="goToMonitorPage" class="monitor-button">
-         📹 监控画面
-       </button>
+       <div class="header-actions">
+         <button @click="goToMonitorPage" class="monitor-button">
+           📹 监控画面
+         </button>
+         <button 
+           @click="toggleRealTimeTracking" 
+           :class="['tracking-toggle-btn', { 'active': isRealTimeTracking }]"
+         >
+           {{ isRealTimeTracking ? '🔴 关闭实时追踪' : '🟢 开启实时追踪' }}
+         </button>
+       </div>
     </header>
     <div class="content">
       <div class="left-panel">
@@ -229,6 +237,22 @@ const eventsLoading = ref(false)
 
 const initialLoadPending = ref(true) // New ref to track if initial load via onFloorplanLoad is pending
 const threeDMap = ref(null)
+
+const isRealTimeTracking = ref(false)
+
+const toggleRealTimeTracking = () => {
+  isRealTimeTracking.value = !isRealTimeTracking.value
+  if (isRealTimeTracking.value) {
+    if (threeDMap.value) {
+      threeDMap.value.connectTracking()
+    }
+  } else {
+    if (threeDMap.value) {
+      threeDMap.value.disconnectTracking()
+    }
+  }
+}
+
 const weeklyAbnormalData = ref([])
 
 // 轨迹相关状态
@@ -1490,12 +1514,18 @@ onMounted(async () => {
   }
 }
 
-// Styles for the Monitor Button
-.monitor-button {
+.header-actions {
   position: absolute;
   top: 50%;
   right: 20px;
   transform: translateY(-50%);
+  display: flex;
+  gap: 15px;
+  z-index: 11;
+}
+
+// Styles for the Monitor Button
+.monitor-button, .tracking-toggle-btn {
   padding: 8px 15px;
   background-color: var(--primary-color, #00ffff);
   color: #001529;
@@ -1503,11 +1533,16 @@ onMounted(async () => {
   border-radius: 4px;
   cursor: pointer;
   font-weight: bold;
-  z-index: 11; 
   transition: background-color 0.3s;
 
   &:hover {
     background-color: #fff;
   }
 }
+
+.tracking-toggle-btn.active {
+  background-color: #ff4d4f;
+  color: white;
+}
+
 </style> 

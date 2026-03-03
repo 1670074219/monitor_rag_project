@@ -36,6 +36,7 @@ def get_camera_config(camera_configs: list, camera_id: str) -> dict:
 
 
 def build_homography(camera_cfg: dict) -> np.ndarray:
+    # 注意：camera_config.json 中的 real_coordinate 必须是楼层底图上的【像素坐标】（如 1500, 800），绝不能是物理米数，否则前端缩放后坐标无限趋近于原点。
     src = np.array(camera_cfg.get("pixel_coordinate", []), dtype=np.float32)
     dst = np.array(camera_cfg.get("real_coordinate", []), dtype=np.float32)
     if src.shape != (4, 2) or dst.shape != (4, 2):
@@ -123,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="实时摄像头轨迹推送服务（YOLO + DeepSORT）")
     parser.add_argument("--camera", required=True, help="camera_config 中的 camera_id，如 camera1")
     parser.add_argument("--camera-config", default=str(CURRENT_DIR / "camera_config.json"), help="camera_config.json 路径")
-    parser.add_argument("--api-url", default="http://127.0.0.1:8000/api/tracking/push", help="轨迹推送接口")
+    parser.add_argument("--api-url", default="http://127.0.0.1:5000/api/tracking/push", help="轨迹推送接口")
     parser.add_argument("--yolo-model", default=str(CURRENT_DIR / "models" / "yolo" / "yolo11s.pt"), help="YOLO 权重路径")
     parser.add_argument(
         "--deepsort-ckpt",

@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "echarts": "^5.4.3",
+    "socket.io-client": "^4.8.3",
     "three": "^0.157.0",
     "vue": "^3.3.4"
   },

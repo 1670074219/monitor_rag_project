@@ -4,6 +4,7 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, shallowRef } from 'vue'
+import { io } from 'socket.io-client'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls'
 import { Line2 } from 'three/examples/jsm/lines/Line2.js';
@@ -780,6 +781,133 @@ const animate = () => {
   }
 }
 
+// ==================== Real-time Tracking ====================
+const realtimeSocket = ref(null);
+const activeTracks = new Map();
+const realtimeTimeoutMs = 3000;
+const MAX_TRAIL_POINTS = 60;
+let cleanupInterval = null;
+
+function colorByTrackId(trackId) {
+  const hue = (trackId * 67) % 360;
+  return `hsl(${hue}, 85%, 52%)`;
+}
+
+const connectTracking = () => {
+  if (realtimeSocket.value) return;
+  console.log("Connecting real-time tracking websocket...");
+  realtimeSocket.value = io('ws://' + window.location.hostname + ':5029/ws/tracking', {
+    transports: ['websocket']
+  });
+
+  realtimeSocket.value.on('tracking_point', (payload) => {
+    if (!isFloorplanLoaded.value || !floorplanImageWidth.value || !floorplanImageHeight.value) {
+      return;
+    }
+
+    const trackId = Number(payload.track_id);
+    
+    // Map coords
+    const normalizedX = payload.x / floorplanImageWidth.value;
+    const normalizedY = payload.y / floorplanImageHeight.value;
+    const sceneX = (normalizedX - 0.5) * floorplanPlaneWidth.value;
+    const sceneZ = (normalizedY - 0.5) * floorplanPlaneHeight.value; 
+
+    const existing = activeTracks.get(trackId);
+    if (!existing) {
+      // Create marker geometries
+      const color = colorByTrackId(trackId);
+      
+      const geometry = new THREE.SphereGeometry(0.15, 16, 16);
+      const material = new THREE.MeshBasicMaterial({ color: new THREE.Color(color) });
+      const marker = new THREE.Mesh(geometry, material);
+      marker.position.set(sceneX, 0.1, sceneZ);
+      scene.value.add(marker);
+
+      activeTracks.set(trackId, {
+        marker,
+        line: null,   
+        history: [{x: sceneX, y: 0.05, z: sceneZ}],
+        color,
+        lastSeenAt: Date.now()
+      });
+    } else {
+      existing.marker.position.set(sceneX, 0.1, sceneZ);
+      existing.history.push({x: sceneX, y: 0.05, z: sceneZ});
+      if (existing.history.length > MAX_TRAIL_POINTS) {
+        existing.history.shift();
+      }
+      existing.lastSeenAt = Date.now();
+      
+      // Update line
+      if (existing.line) {
+        scene.value.remove(existing.line);
+        existing.line.geometry.dispose();
+      }
+      if (existing.history.length > 1) {
+        const positions = [];
+        existing.history.forEach(coord => {
+          positions.push(coord.x, coord.y, coord.z);
+        });
+        const geometry = new LineGeometry();
+        geometry.setPositions(positions);
+        const material = new LineMaterial({
+          color: new THREE.Color(existing.color),
+          linewidth: 3, 
+          dashed: false,
+          transparent: true,
+          opacity: 0.7,
+        });
+        material.resolution.set(container.value.clientWidth, container.value.clientHeight);
+        const line = new Line2(geometry, material);
+        line.computeLineDistances();
+        scene.value.add(line);
+        existing.line = line;
+      }
+    }
+  });
+
+  cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    activeTracks.forEach((track, trackId) => {
+      if (now - track.lastSeenAt > realtimeTimeoutMs) {
+        removeRealtimeTrack(trackId);
+      }
+    });
+  }, 1000);
+};
+
+const removeRealtimeTrack = (trackId) => {
+  const track = activeTracks.get(trackId);
+  if (track) {
+    if (track.marker) {
+      scene.value.remove(track.marker);
+      track.marker.geometry.dispose();
+      track.marker.material.dispose();
+    }
+    if (track.line) {
+      scene.value.remove(track.line);
+      track.line.geometry.dispose();
+      track.line.material.dispose();
+    }
+    activeTracks.delete(trackId);
+  }
+}
+
+const disconnectTracking = () => {
+  if (realtimeSocket.value) {
+    realtimeSocket.value.disconnect();
+    realtimeSocket.value = null;
+  }
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
+  }
+  activeTracks.forEach((_, trackId) => {
+    removeRealtimeTrack(trackId);
+  });
+};
+
 // 清理函数
 const cleanup = () => {
   if (animationFrameId) {
@@ -789,6 +917,7 @@ const cleanup = () => {
   // 清除轨迹线条
   clearTrajectories()
   clearGlobalTrajectories()
+  disconnectTracking()
   
   if (scene.value) {
     // 清除更新函数
@@ -899,6 +1028,8 @@ const emit = defineEmits(['markerClick'])
 
 // 暴露方法
 defineExpose({
+  connectTracking,
+  disconnectTracking,
   addMarker,
   clearMarkers,
   toggleTrajectory,

@@ -3,6 +3,7 @@ import json
 import logging
 from flask import Flask, request, jsonify, send_from_directory, Response, render_template
 from flask_cors import CORS
+from flask_socketio import SocketIO
 from queue import Queue
 import threading
 import glob
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__, template_folder='monitor_page/templates')
 CORS(app)  # 允许跨域请求
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 # 摄像头配置路径
 CAMERA_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_process', 'camera_config.json')
@@ -1645,6 +1647,41 @@ def get_related_events(event_id):
         logger.error(f"获取相关事件错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
 
+
+@app.route('/api/tracking/push', methods=['POST'])
+def push_tracking_point():
+    """接收算法端实时坐标并广播给前端 Socket.IO 客户端"""
+    try:
+        data = request.get_json(silent=True) or {}
+        track_id = data.get('track_id')
+        x = data.get('x')
+        y = data.get('y')
+
+        if track_id is None or x is None or y is None:
+            return jsonify({'ok': False, 'error': '缺少 track_id/x/y 字段'}), 400
+
+        payload = {
+            'track_id': track_id,
+            'x': x,
+            'y': y
+        }
+
+        socketio.emit('tracking_point', payload, namespace='/ws/tracking')
+        return jsonify({'ok': True, 'data': payload})
+    except Exception as e:
+        logger.error(f"处理轨迹推送失败: {str(e)}")
+        return jsonify({'ok': False, 'error': '服务器错误'}), 500
+
+
+@socketio.on('connect', namespace='/ws/tracking')
+def tracking_connect():
+    logger.info('客户端已连接到 /ws/tracking')
+
+
+@socketio.on('disconnect', namespace='/ws/tracking')
+def tracking_disconnect():
+    logger.info('客户端已断开 /ws/tracking')
+
 def extract_keywords(text):
     """提取关键词"""
     try:
@@ -1748,9 +1785,9 @@ if __name__ == '__main__':
     # 初始化所有服务器
     init_servers()
     
-    # 启动Flask应用
-    logger.info("Starting Flask app on port 5000...")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    # 启动Flask-SocketIO应用
+    logger.info("Starting Flask-SocketIO app on port 5000...")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
     # from gevent.pywsgi import WSGIServer
     # http_server = WSGIServer(('0.0.0.0', 5000), app)
     # http_server.serve_forever() 
