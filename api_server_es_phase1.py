@@ -1,7 +1,7 @@
 import os
 import json
 import logging
-from flask import Flask, request, jsonify, send_from_directory, Response, render_template
+from flask import Flask, request, jsonify, send_from_directory, Response
 from flask_cors import CORS
 from flask_socketio import SocketIO
 from queue import Queue
@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__, template_folder='monitor_page/templates')
+app = Flask(__name__)
 CORS(app)  # 允许跨域请求
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
@@ -338,13 +338,6 @@ CAMERA_REGIONS = {
 }
 
 
-
-@app.route('/monitor')
-def monitor():
-    """监控页面"""
-    if not camera_urls:
-        load_cameras()
-    return render_template('index.html', cameras=list(camera_urls.keys()))
 
 @app.route('/api/cameras', methods=['GET'])
 def get_cameras():

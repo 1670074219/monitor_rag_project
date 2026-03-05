@@ -2,11 +2,7 @@
   <div class="smart-city">
     <header class="header">
       <h1>智慧监控数据可视化展示</h1>
-       <!-- Monitor Button -->
        <div class="header-actions">
-         <button @click="goToMonitorPage" class="monitor-button">
-           📹 监控画面
-         </button>
          <button 
            @click="toggleRealTimeTracking" 
            :class="['tracking-toggle-btn', { 'active': isRealTimeTracking }]"
@@ -196,46 +192,6 @@ import DailyEventTypeChart from './components/DailyEventTypeChart.vue'
 
 // Add state for the new dropdown chat
 // const isChatDropdownVisible = ref(false);
-
-const goToMonitorPage = () => {
-  // Assuming the monitor page is served at /monitor or a separate port
-  // Since it's a separate Flask app, we might need to know its URL.
-  // For now, let's assume it's on the same host but we need to link to it.
-  // If it's a separate app, maybe we just open a new tab.
-  // The user said "click to jump to that page".
-  // Let's assume it's served at /monitor/index.html or similar if integrated,
-  // or a different port.
-  // Given the file structure, monitor_page is a separate app.
-  // Let's assume we will serve it via the main app or link to it.
-  // For now, I'll just put a placeholder alert or link to the file.
-  // Wait, the user said "integrate this page".
-  // If I can't merge the apps easily, I might just link to the other port if running.
-  // But better: serve the static file from the main app.
-  
-  // I will serve the monitor page from the main app.
-  // I need to add a route in api_server.py to serve the monitor page.
-  // window.open('/monitor', '_blank');
-  
-  // Use the API base URL to construct the monitor URL
-  // If apiBaseUrl is relative (e.g. /api), we need to handle it.
-  // But usually for dev it's proxied.
-  // However, window.open('/monitor') opens relative to frontend origin (port 3001).
-  // Vite proxy is configured to forward /monitor to backend (port 5000).
-  // So window.open('/monitor', '_blank') SHOULD work if the proxy is set up correctly.
-  // But if it's not working, maybe the proxy isn't catching it or it's redirecting.
-  
-  // Let's try to force the backend URL if possible, or ensure the proxy works.
-  // Since I just added the proxy config in vite.config.js, it should work after restart.
-  // But to be safe, let's try to use the absolute URL if we know it.
-  // In production, they are likely on the same origin.
-  // In dev, they are different.
-  
-  // If I use window.location.origin + '/monitor', it goes through Vite.
-  // Vite proxy should handle it.
-  window.open('/monitor', '_blank');
-};
-
-
 
 // 使用数据中存在的日期，而不是今天
 const formatDate = (date) => date.toISOString().split('T')[0]
@@ -1653,8 +1609,7 @@ onMounted(async () => {
   z-index: 11;
 }
 
-// Styles for the Monitor Button
-.monitor-button, .tracking-toggle-btn {
+.tracking-toggle-btn {
   padding: 8px 15px;
   background-color: var(--primary-color, #00ffff);
   color: #001529;

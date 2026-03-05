@@ -109,10 +109,6 @@ export default defineConfig({
         // secure: false, // Uncomment if your backend is http and vite is https (not common in dev)
         // rewrite: (path) => path.replace(/^\/api/, '') // Uncomment if backend API paths don't start with /api
       },
-      '/monitor': {
-        target: API_TARGET,
-        changeOrigin: true
-      },
       '/video_feed': {
         target: API_TARGET,
         changeOrigin: true
