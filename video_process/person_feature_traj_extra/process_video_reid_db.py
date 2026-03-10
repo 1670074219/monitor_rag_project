@@ -8,6 +8,7 @@ import re
 import pymysql
 import gc
 import sys
+import time
 from PIL import Image
 import torchvision.transforms as T
 from ultralytics import YOLO
@@ -273,35 +274,37 @@ class VideoProcessor:
         return (real[0, 0] / real[2, 0], real[1, 0] / real[2, 0])
 
     def process_db_videos(self):
-        """处理所有视频的主循环"""
+        """按批次处理未分析视频，返回本轮处理数量"""
         conn = self.get_connection()
         try:
             with conn.cursor() as cursor:
-                # 获取所有视频
-                cursor.execute("SELECT id, video_name, video_path FROM videos")
+                # ⭐【增量处理】仅拉取未处理的视频，按 ID 升序，单批最多 50 条
+                cursor.execute(
+                    "SELECT id, video_name, video_path FROM videos "
+                    "WHERE is_analyzed = 0 ORDER BY id ASC LIMIT 50"
+                )
                 videos = cursor.fetchall()
         finally:
             conn.close()
 
-        print(f"📋 共有 {len(videos)} 个视频待检查...")
+        # ⭐【空批次返回】无新任务时返回 0，供外层 daemon 决定休眠时长
+        if not videos:
+            return 0
+
+        print(f"📋 本轮拉取到 {len(videos)} 个未处理视频...")
+
+        processed_count = 0
 
         for video in videos:
             self.process_one_video(video)
+            processed_count += 1
             gc.collect() # 清理内存
+
+        return processed_count
 
     def process_one_video(self, video):
         video_id, name, path = video['id'], video['video_name'], video['video_path']
-        
-        # 检查是否处理过
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT id FROM video_vectors WHERE video_id = %s", (video_id,))
-                if cursor.fetchone():
-                    print(f"⏭️ 跳过: {name} (已存在)")
-                    return
-        finally:
-            conn.close()
+        # ⭐【去冗余】是否已处理由 process_db_videos 的 is_analyzed=0 过滤控制，这里不再二次查 video_vectors
 
         if not os.path.exists(path):
             print(f"❌ 文件不存在: {path}")
@@ -314,6 +317,19 @@ class VideoProcessor:
         print(f"▶️ 正在处理: {name} (Camera: {camera_id}) ...")
         results = self.analyze_video(path, camera_id)
         self.save_results(video_id, results)
+
+        # ⭐【关键】视频处理完成后，回写已处理标记，避免后续重复扫描
+        conn = self.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("UPDATE videos SET is_analyzed = 1 WHERE id = %s", (video_id,))
+            conn.commit()
+            print(f"✅ Video ID {video_id} 已更新为 is_analyzed=1")
+        except Exception as e:
+            conn.rollback()
+            print(f"⚠️ Video ID {video_id} 更新 is_analyzed 失败: {e}")
+        finally:
+            conn.close()
 
     def analyze_video(self, video_path, camera_id):
         H = self.get_homography(camera_id)
@@ -336,8 +352,8 @@ class VideoProcessor:
                 break
             frame_count += 1
             
-            # 每 5 帧处理一次
-            if frame_count % 5 != 0:
+            # ⭐【按需求放宽】每 2 帧处理 1 帧，提升追踪连贯性并减少轨迹断裂
+            if frame_count % 2 != 0:
                 continue
 
             # 1. YOLO 检测
@@ -347,19 +363,23 @@ class VideoProcessor:
             detections = []
             if results[0].boxes:
                 for box in results[0].boxes:
-                    # 类别 0 是人，置信度 > 0.65（进一步收紧门槛）
-                    if int(box.cls) == 0 and box.conf > 0.65:
+                    # ⭐【按需求放宽】类别 0 是人，置信度阈值由 0.65 下调到 0.45
+                    if int(box.cls) == 0 and box.conf > 0.45:
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         
                         # 几何形状过滤 (宽高比)
                         w_box = x2 - x1
                         h_box = y2 - y1
-                        # ⭐【新增-形态学拦截】过滤极小目标与方正目标（如巡检机器人）
-                        # 1) 高度 < 80 直接过滤；2) 人体宽度通常不超过高度 65%
-                        if h_box < 80 or w_box > h_box * 0.65:
+                        # ⭐【按需求放宽】形态学拦截：最小高度 80 -> 40，宽高比 0.65 -> 0.85
+                        # 以兼容远处小目标、侧身/弯腰或宽松着装行人
+                        if h_box < 40 or w_box > h_box * 0.85:
                             continue
                             
                         detections.append([x1, y1, x2, y2, box.conf.item()])
+
+            # ⭐【按需求新增】Debug 打印：观测每个处理帧的有效检测目标数量
+            # if detections:
+            #     print(f"[Debug] Frame {frame_count}: YOLO 捕捉到 {len(detections)} 个有效目标")
 
             # 2. DeepSORT 更新
             if detections:
@@ -480,6 +500,7 @@ class VideoProcessor:
 
             # ⭐【核心新增】静止目标过滤：基于最大活动半径判断“绝对静止”背景误检
             start_pt = np.array(traj[0], dtype=np.float32)
+            end_pt = np.array(traj[-1], dtype=np.float32)
             max_dist = 0.0
             for point in traj:
                 point_arr = np.array(point, dtype=np.float32)
@@ -487,8 +508,11 @@ class VideoProcessor:
                 if dist > max_dist:
                     max_dist = dist
 
-            if max_dist < 5.0:
-                print(f"  ⚠️ ID {tid} 被过滤: 目标绝对静止 (max_dist={max_dist:.2f} < 5.0)，判定为背景误检")
+            # ⭐【按需求放宽】静止阈值由 5.0 下调至 1.5，降低远处目标被误判为静止的概率
+            if max_dist < 1.5:
+                print(f"  ⚠️ ID {tid} 被过滤: 目标绝对静止 (max_dist={max_dist:.2f} < 1.5)，判定为背景误检")
+                # ⭐【按需求新增】输出轨迹起点/终点，辅助排查 Homography 映射异常
+                print(f"      起始点: {start_pt.tolist()}, 结束点: {end_pt.tolist()}")
                 data['best_crop'] = None
                 continue
 
@@ -572,11 +596,17 @@ class VideoProcessor:
 # ▶️ 运行
 # -----------------------------------------------------------
 if __name__ == "__main__":
-    # 确保清理表以便重新测试
-    # answer = input("是否清空 video_vectors 表重新开始? (y/n): ")
-    # if answer.lower() == 'y':
-    #     # ... (执行 truncate 代码) ...
-    #     pass
-    
     processor = VideoProcessor()
-    processor.process_db_videos()
+    print("🚀 服务已启动，正在后台监听新视频...")
+
+    # ⭐【Daemon 化】常驻轮询：有活快跑，无活短休眠；异常兜底避免进程退出
+    while True:
+        try:
+            processed_count = processor.process_db_videos()
+            if processed_count == 0:
+                time.sleep(10)
+            else:
+                time.sleep(2)
+        except Exception as e:
+            print(f"❌ Daemon 主循环异常: {e}")
+            time.sleep(30)

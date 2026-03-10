@@ -927,25 +927,59 @@ def get_camera_position(camera_id):
 @app.route('/api/events')
 def get_events():
     """获取所有事件数据，转换为前端需要的格式"""
+    conn = None
+    cursor = None
     try:
         import random
-        with open(video_description_path, 'r', encoding='utf-8') as f:
-            video_data = json.load(f)
-        
+
+        # ⭐ 按日期动态过滤：支持 2026-03-05 / 2026/03/05
+        target_date = request.args.get('date')
+        date_keyword = (target_date or '').replace('-', '').replace('/', '').strip()
+
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': '数据库连接失败'}), 500
+
+        cursor = conn.cursor(dictionary=True)
+
+        # ⭐ 动态 SQL：首页默认最新 300 条；指定日期时按 video_name LIKE 过滤
+        if date_keyword:
+            sql = "SELECT id, video_name, video_path, description FROM videos WHERE video_name LIKE %s ORDER BY id DESC"
+            cursor.execute(sql, (f"%{date_keyword}%",))
+        else:
+            sql = "SELECT id, video_name, video_path, description FROM videos ORDER BY id DESC LIMIT 300"
+            cursor.execute(sql)
+
+        db_videos = cursor.fetchall()
+        if not db_videos:
+            return jsonify([])
+
         # 先按摄像头分组，计算每个摄像头的事件数量
         camera_events = {}
-        for video_key, video_info in video_data.items():
-            camera_id = video_key.split('_')[0]
-            timestamp = parse_video_key_to_timestamp(video_key)
-            if not timestamp:
+        for video in db_videos:
+            video_name = (video.get('video_name') or '').strip()
+            video_key = os.path.splitext(video_name)[0] if video_name else str(video.get('id'))
+
+            # ⭐ 使用正则 + time.mktime 解析时间，避免时区偏移问题
+            ts_match = re.search(r'(\d{8})_?(\d{6})', video_key) or re.search(r'(\d{8})_?(\d{6})', video_name)
+            if not ts_match:
                 continue
-                
+
+            try:
+                dt_compact = f"{ts_match.group(1)}{ts_match.group(2)}"
+                timestamp = int(time.mktime(time.strptime(dt_compact, '%Y%m%d%H%M%S')))
+            except Exception:
+                continue
+
+            camera_match = re.search(r'(camera\d+)', video_name, re.IGNORECASE) or re.search(r'(camera\d+)', video_key, re.IGNORECASE)
+            camera_id = camera_match.group(1).lower() if camera_match else 'camera1'
+
             if camera_id not in camera_events:
                 camera_events[camera_id] = []
-            
+
             camera_events[camera_id].append({
                 'video_key': video_key,
-                'video_info': video_info,
+                'video_info': video,
                 'timestamp': timestamp
             })
         
@@ -987,7 +1021,7 @@ def get_events():
                 
                 # 检查是否为异常事件
                 is_abnormal = False
-                analyse_result = video_info.get('analyse_result', '')
+                analyse_result = (video_info.get('description') or '').strip()
                 if analyse_result:
                     abnormal_keywords = ['异常', '打架', '闯入', '跌倒', '争执', '暴力', '紧急']
                     is_abnormal = any(keyword in analyse_result for keyword in abnormal_keywords)
@@ -1001,6 +1035,7 @@ def get_events():
                     'videoFile': video_file,
                     'cam_id': camera_id,
                     'date_str': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d'),
+                    'date_str_slash': datetime.fromtimestamp(timestamp).strftime('%Y/%m/%d'),
                     'time_str': datetime.fromtimestamp(timestamp).strftime('%H:%M:%S'),
                     'index': video_info.get('idx', 0),
                     'sourceFile': video_key,
@@ -1012,7 +1047,7 @@ def get_events():
                 events.append(event)
         
         # 按时间戳排序所有事件
-        events.sort(key=lambda x: x['timestamp'])
+        events.sort(key=lambda x: x['timestamp'], reverse=True)
         
         # 统计摄像头分布
         camera_event_counts = {}
@@ -1025,6 +1060,11 @@ def get_events():
     except Exception as e:
         logger.error(f"获取事件数据错误: {str(e)}")
         return jsonify({'error': '服务器错误'}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 def calculate_grid_position(camera_id, event_index, base_position, total_events_for_camera):
     """
@@ -1321,83 +1361,42 @@ def get_events_3d():
     conn = None
     cursor = None
     try:
-        # 读取 JSON 作为分析文本/兼容回退
-        video_data = {}
-        if video_description_path and os.path.exists(video_description_path):
-            try:
-                with open(video_description_path, 'r', encoding='utf-8') as f:
-                    video_data = json.load(f)
-            except Exception as e:
-                logger.warning(f"读取 video_description.json 失败，将仅使用DB: {e}")
+        # ⭐ 按日期动态过滤：支持 2026-03-05 / 2026/03/05
+        target_date = request.args.get('date')
+        date_keyword = (target_date or '').replace('-', '').replace('/', '').strip()
 
         conn = get_db_connection()
         if not conn:
-            logger.warning("events_3d 数据源回退到 JSON：数据库连接失败")
-            if not video_data:
-                return jsonify([])
-
-            events = []
-            for video_key, video_info in video_data.items():
-                event_info = parse_event_filename(video_key)
-                if not event_info:
-                    camera_id = video_key.split('_')[0] if '_' in video_key else 'camera1'
-                    timestamp = parse_video_key_to_timestamp(video_key)
-                    if not timestamp:
-                        continue
-                    event_info = {
-                        'camera_id': camera_id,
-                        'timestamp': timestamp,
-                        'sequence': 0,
-                        'original_filename': video_key
-                    }
-
-                has_trajectory = 'trajectory_data' in video_info and 'trajectories' in video_info['trajectory_data']
-                if has_trajectory and video_info['trajectory_data']['trajectories']:
-                    first_trajectory = video_info['trajectory_data']['trajectories'][0]
-                    if first_trajectory.get('coordinates') and len(first_trajectory['coordinates'][0]) >= 2:
-                        start_coord = first_trajectory['coordinates'][0]
-                        position = {'pixel_x': start_coord[0], 'pixel_y': start_coord[1]}
-                    else:
-                        position = generate_random_position_in_area(event_info['camera_id'], video_key)
-                else:
-                    position = generate_random_position_in_area(event_info['camera_id'], video_key)
-
-                if not position:
-                    continue
-
-                analyse_result = video_info.get('analyse_result', '')
-                abnormal_keywords = ['异常', '打架', '闯入', '跌倒', '争执', '暴力', '紧急', '危险']
-                is_abnormal = any(keyword in analyse_result for keyword in abnormal_keywords) if analyse_result else False
-
-                video_file = os.path.basename(video_info['video_path']) if video_info.get('video_path') else None
-                events.append({
-                    'id': video_key,
-                    'timestamp': event_info['timestamp'],
-                    'position': position,
-                    'content': analyse_result or '监控记录',
-                    'videoFile': video_file,
-                    'camera_id': event_info['camera_id'],
-                    'sequence': event_info['sequence'],
-                    'date_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%Y-%m-%d'),
-                    'time_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%H:%M:%S'),
-                    'is_abnormal': is_abnormal,
-                    'type': 'abnormal' if is_abnormal else 'normal',
-                    'has_trajectory': has_trajectory
-                })
-
-            events.sort(key=lambda x: x['timestamp'])
-            logger.info(f"返回 {len(events)} 个3D事件 (数据源: JSON回退)")
-            return jsonify(events)
+            return jsonify({'error': '数据库连接失败'}), 500
 
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, video_name, video_path, description FROM videos ORDER BY id DESC")
+
+        # ⭐ 动态 SQL：首页默认最新 300 条；指定日期时按 video_name LIKE 过滤
+        if date_keyword:
+            sql = "SELECT id, video_name, video_path, description FROM videos WHERE video_name LIKE %s ORDER BY id DESC"
+            cursor.execute(sql, (f"%{date_keyword}%",))
+        else:
+            sql = "SELECT id, video_name, video_path, description FROM videos ORDER BY id DESC LIMIT 300"
+            cursor.execute(sql)
+
         db_videos = cursor.fetchall()
         if not db_videos:
             logger.info("events_3d: videos 表为空，返回空列表")
             return jsonify([])
 
-        cursor.execute("SELECT video_id, person_trajectory FROM video_vectors ORDER BY video_id, person_index")
+        # ⭐ 严禁全表扫描轨迹：仅对本次视频列表的 video_id 做定向查询
+        video_ids = [row['id'] for row in db_videos if row.get('id') is not None]
+        if not video_ids:
+            return jsonify([])
+
+        placeholders = ','.join(['%s'] * len(video_ids))
+        query_vectors = (
+            f"SELECT video_id, person_index, person_trajectory "
+            f"FROM video_vectors WHERE video_id IN ({placeholders}) ORDER BY video_id, person_index"
+        )
+        cursor.execute(query_vectors, tuple(video_ids))
         vector_rows = cursor.fetchall()
+
         first_traj_by_video = {}
         for row in vector_rows:
             vid = row.get('video_id')
@@ -1421,51 +1420,51 @@ def get_events_3d():
             video_path = video.get('video_path') or ''
             video_key = os.path.splitext(video_name)[0] if video_name else str(video_id)
 
-            event_info = parse_event_filename(video_key)
-            if not event_info:
-                camera_match = re.search(r'(camera\d+)', video_name, re.IGNORECASE)
-                camera_id = camera_match.group(1).lower() if camera_match else 'camera1'
-                timestamp = parse_video_key_to_timestamp(video_key)
-                if not timestamp:
+            # ⭐ 使用正则 + time.mktime 解析时间，避免时区偏移问题
+            ts_match = re.search(r'(\d{8})_?(\d{6})', video_key) or re.search(r'(\d{8})_?(\d{6})', video_name)
+            if ts_match:
+                try:
+                    dt_compact = f"{ts_match.group(1)}{ts_match.group(2)}"
+                    timestamp = int(time.mktime(time.strptime(dt_compact, '%Y%m%d%H%M%S')))
+                except Exception:
                     timestamp = int(time.time())
-                event_info = {
-                    'camera_id': camera_id,
-                    'timestamp': timestamp,
-                    'sequence': 0,
-                    'original_filename': video_key
-                }
+            else:
+                timestamp = int(time.time())
+
+            camera_match = re.search(r'(camera\d+)', video_name, re.IGNORECASE) or re.search(r'(camera\d+)', video_key, re.IGNORECASE)
+            camera_id = camera_match.group(1).lower() if camera_match else 'camera1'
 
             start_point = first_traj_by_video.get(video_id)
             has_trajectory = bool(start_point)
             if has_trajectory and len(start_point) >= 2:
                 position = {'pixel_x': start_point[0], 'pixel_y': start_point[1]}
             else:
-                position = generate_random_position_in_area(event_info['camera_id'], video_key)
+                position = generate_random_position_in_area(camera_id, video_key)
 
             if not position:
                 continue
 
-            video_info = video_data.get(video_key, {}) if isinstance(video_data, dict) else {}
-            analyse_result = video.get('description') or video_info.get('analyse_result', '') or '监控记录'
+            analyse_result = (video.get('description') or '').strip() or '监控记录'
             abnormal_keywords = ['异常', '打架', '闯入', '跌倒', '争执', '暴力', '紧急', '危险']
             is_abnormal = any(keyword in analyse_result for keyword in abnormal_keywords)
 
             events.append({
                 'id': video_key,
-                'timestamp': event_info['timestamp'],
+                'timestamp': timestamp,
                 'position': position,
                 'content': analyse_result,
                 'videoFile': os.path.basename(video_path) if video_path else video_name,
-                'camera_id': event_info['camera_id'],
-                'sequence': event_info['sequence'],
-                'date_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%Y-%m-%d'),
-                'time_str': datetime.fromtimestamp(event_info['timestamp']).strftime('%H:%M:%S'),
+                'camera_id': camera_id,
+                'sequence': 0,
+                'date_str': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d'),
+                'date_str_slash': datetime.fromtimestamp(timestamp).strftime('%Y/%m/%d'),
+                'time_str': datetime.fromtimestamp(timestamp).strftime('%H:%M:%S'),
                 'is_abnormal': is_abnormal,
                 'type': 'abnormal' if is_abnormal else 'normal',
                 'has_trajectory': has_trajectory
             })
 
-        events.sort(key=lambda x: x['timestamp'])
+        events.sort(key=lambda x: x['timestamp'], reverse=True)
         track_count = sum(1 for item in events if item.get('has_trajectory'))
         logger.info(f"返回 {len(events)} 个3D事件 (数据源: DB优先, 含轨迹事件: {track_count})")
         return jsonify(events)

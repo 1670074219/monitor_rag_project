@@ -193,11 +193,16 @@ import DailyEventTypeChart from './components/DailyEventTypeChart.vue'
 // Add state for the new dropdown chat
 // const isChatDropdownVisible = ref(false);
 
-// 使用数据中存在的日期，而不是今天
-const formatDate = (date) => date.toISOString().split('T')[0]
+// 使用本地时区格式化日期，避免 toISOString 带来的 UTC 跨日偏移
+const formatDate = (date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
-// 设置为2025-06-23，因为API数据中有这个日期的事件和轨迹数据
-const selectedDate = ref('2025-06-23')
+// 默认选择今天，避免写死历史日期导致首屏无数据
+const selectedDate = ref(formatDate(new Date()))
 const timeOfDaySeconds = ref(0)
 
 // Restore absoluteTimestampForFiltering and other removed refs
@@ -784,8 +789,11 @@ const fetchEvents = async () => {
   eventsLoading.value = true;
   console.log(`正在获取事件数据...`);
   try {
-    // 直接使用区域随机布局
-    const apiEndpoint = '/api/events_3d';
+    // 将前端日期动态传给后端，支持 yyyy-mm-dd / yyyy/mm/dd
+    const normalizedSelectedDate = (selectedDate.value || '').replace(/\//g, '-').trim();
+    const apiEndpoint = normalizedSelectedDate
+      ? `/api/events_3d?date=${encodeURIComponent(normalizedSelectedDate)}`
+      : '/api/events_3d';
     const layoutType = '区域内随机分布';
     
     const response = await fetch(apiEndpoint);
