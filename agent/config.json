@@ -1,0 +1,22 @@
+{
+    "regions": {
+        "307卫生卫生间": [2318, 381],
+        "308卫生卫生间": [795, 374],
+        "307电梯": [1816, 816],
+        "308电梯": [1310, 536],
+        "机房": [2666, 691]
+    },
+    "mysql": {
+        "host": "219.216.99.30",
+        "port": 3306,
+        "database": "monitor_database",
+        "user": "root",
+        "password": "q1w2e3az",
+        "charset": "utf8mb4",
+        "autocommit": false
+    },
+    "elasticsearch": {
+        "es_url": "http://219.216.99.30:9200",
+        "name": "video_logs_index"
+    }
+}
