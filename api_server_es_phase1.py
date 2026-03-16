@@ -19,9 +19,25 @@ import mysql.connector
 from mysql.connector import Error
 import cv2
 import time
+from langchain_core.messages import HumanMessage
 
 from video_process.log_feature_extra.elasticsearch_worker import ElasticSearchWorker
 from video_process.person_search.person_search_engine import PersonSearchEngine
+
+try:
+    from agent.multi_agent import (
+        build_llm,
+        route_query,
+        build_security_agent,
+        build_general_agent,
+    )
+except Exception as e:
+    build_llm = None
+    route_query = None
+    build_security_agent = None
+    build_general_agent = None
+    logger = logging.getLogger(__name__)
+    logger.warning(f"multi_agent 导入失败，/api/agent/chat 将不可用: {e}")
 
 # Force FFmpeg to use TCP for RTSP to improve stability and avoid UDP packet loss/timeouts
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -602,6 +618,91 @@ def query():
             'status': 'error',
             'error_message': f'服务器内部错误: {str(e)}'
         }), 500
+
+
+@app.route('/api/agent/chat', methods=['POST'])
+def agent_chat():
+    """MVP Agent 对话接口：前端文本 -> 多智能体 -> 纯文本回答。"""
+    data = request.get_json(silent=True) or {}
+    query_text = (data.get('query') or '').strip()
+    if not query_text:
+        return jsonify({
+            'status': 'error',
+            'message': 'query 不能为空'
+        }), 400
+
+    try:
+        if not all([build_llm, route_query, build_security_agent, build_general_agent]):
+            raise RuntimeError('multi_agent 组件未就绪')
+
+        llm = build_llm()
+        decision = route_query(llm, query_text)
+        route_name = decision.agent_name
+
+        if route_name == 'security':
+            chosen_agent = build_security_agent(llm)
+        else:
+            chosen_agent = build_general_agent(llm)
+
+        final_answer = ''
+        intercepted_payload = {
+            'traces': [],
+            'videos': [],
+        }
+
+        for event in chosen_agent.stream(
+            {'messages': [HumanMessage(content=query_text)]},
+            stream_mode='values'
+        ):
+            message = event['messages'][-1]
+
+            if message.type == 'tool':
+                tool_content = message.content
+                parsed_tool = None
+                if isinstance(tool_content, str):
+                    try:
+                        parsed_tool = json.loads(tool_content)
+                    except Exception:
+                        parsed_tool = None
+                elif isinstance(tool_content, dict):
+                    parsed_tool = tool_content
+
+                if isinstance(parsed_tool, dict):
+                    traces = parsed_tool.get('traces')
+                    videos = parsed_tool.get('videos') or parsed_tool.get('results')
+                    if isinstance(traces, list):
+                        intercepted_payload['traces'].extend(traces)
+                    if isinstance(videos, list):
+                        intercepted_payload['videos'].extend(videos)
+                continue
+
+            if message.type == 'ai' and not getattr(message, 'tool_calls', None):
+                content = message.content
+                if isinstance(content, str):
+                    final_answer = content
+                elif isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get('type') == 'text':
+                            text_parts.append(part.get('text', ''))
+                        else:
+                            text_parts.append(str(part))
+                    final_answer = ''.join(text_parts)
+                else:
+                    final_answer = str(content)
+
+        # MVP 不向前端透出工具侧信道，仅返回最终文本。
+        _ = intercepted_payload
+
+        return jsonify({
+            'status': 'success',
+            'route': route_name,
+            'answer': final_answer
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": f"智能体内部错误: {str(e)}"}), 500
 
 @app.route('/api/video_persons/<video_id>', methods=['GET'])
 def get_video_persons(video_id):

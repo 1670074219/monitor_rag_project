@@ -78,9 +78,9 @@ const sendMessage = async () => {
   scrollToBottom() // 滚动到底部
 
   try {
-    // 2. 调用后端 API
-    console.log('Sending query to backend:', query)
-    const response = await fetch('/api/query', {
+    // 2. 调用 Agent 对话 API（MVP：仅纯文本问答）
+    console.log('Sending query to agent backend:', query)
+    const response = await fetch('/api/agent/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -105,34 +105,29 @@ const sendMessage = async () => {
       }
       assistantMessage = { sender: 'assistant', type: 'error', text: errorText }
     } else {
-      // 3. 添加 RAG 的回复到聊天记录
+      // 3. 解析 Agent 回复并写入聊天记录（纯文本）
       const responseData = await response.json()
-      console.log('API Success Data:', responseData)
+      console.log('Agent API Success Data:', responseData)
 
-      // Check the status field from backend
-      if (responseData.status === 'success' && responseData.data) {
-        // Successfully parsed JSON from LLM
-        // The actual LLM output is in responseData.data
-        assistantMessage = { 
-          sender: 'assistant', 
-          type: 'structured', 
-          data: responseData.data // This should be the object with "相关日志" and "总结报告"
-        };
-      } else if (responseData.status === 'error') { // Simplified error handling from backend
-        // LLM output was not valid JSON, or other backend error
-        console.warn('Backend reported an error or LLM output was not valid JSON.');
-        assistantMessage = { 
-          sender: 'assistant', 
-          type: 'error', // Display as an error
-          text: responseData.error_message || responseData.raw_answer || '发生未知错误' 
-        };
+      if (responseData.status === 'success') {
+        const route = responseData.route ? `[${responseData.route}] ` : ''
+        assistantMessage = {
+          sender: 'assistant',
+          type: 'text',
+          text: `${route}${responseData.answer || '已完成处理，但未返回文本内容。'}`,
+        }
+      } else if (responseData.status === 'error') {
+        assistantMessage = {
+          sender: 'assistant',
+          type: 'error',
+          text: responseData.message || responseData.error_message || '发生未知错误',
+        }
       } else {
-        // Unexpected success response structure from backend
-        console.error('Unexpected success response structure:', responseData)
-        assistantMessage = { 
-          sender: 'assistant', 
-          type: 'error', 
-          text: '收到意外的响应格式，无法解析回答。' 
+        console.error('Unexpected agent response structure:', responseData)
+        assistantMessage = {
+          sender: 'assistant',
+          type: 'error',
+          text: '收到意外的响应格式，无法解析回答。',
         }
       }
     }
@@ -143,7 +138,7 @@ const sendMessage = async () => {
     messages.value.push({
       sender: 'assistant',
       type: 'error',
-      text: '抱歉，无法连接到问答服务。请检查后端服务是否运行以及网络连接。',
+      text: '抱歉，无法连接到智能体服务。请检查后端服务是否运行以及网络连接。',
     })
   } finally {
     isLoading.value = false // 结束加载状态
